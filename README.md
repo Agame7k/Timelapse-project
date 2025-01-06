@@ -71,8 +71,17 @@ SMB_PATH=/path/to/storage
 ## Usage
 
 1. Start the system:
+
+WINDOWS
+
 ```bash
-python timelapse.py
+start.bat
+```
+
+LINUX
+```bash
+chmod +x start.sh
+./start.sh
 ```
 
 2. Discord Commands:
@@ -87,18 +96,6 @@ python timelapse.py
 /notifications - Toggle motion alerts
 ```
 
-## Directory Structure
-```
-timelapse2.0/
-├── timelapse.py
-├── cred.env
-├── README.md
-├── timelapse_photos_primary/
-│   └── camera0/
-├── timelapse_photos_backup/
-│   └── camera0/
-└── logs/
-```
 
 ## Configuration
 
