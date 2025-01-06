@@ -1,0 +1,15 @@
+# Credentials and settings
+cred.env
+*.json
+
+# Photo directories
+timelapse_photos_backup/
+timelapse_photos_primary/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Log files
+*.log
