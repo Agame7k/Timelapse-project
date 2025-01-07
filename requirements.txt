@@ -1,0 +1,19 @@
+# Discord Integration
+discord.py>=2.3.0
+python-dotenv>=1.0.0
+
+# Computer Vision & Image Processing
+opencv-python>=4.8.0
+Pillow>=10.0.0
+
+# SMB File Sharing
+pysmb>=1.2.9
+
+# System Monitoring
+psutil>=5.9.0
+
+# Async Support
+asyncio>=3.4.3
+
+# Logging & DateTime
+python-dateutil>=2.8.2
