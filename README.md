@@ -24,7 +24,7 @@ A Python-based camera monitoring system with Discord integration, motion detecti
 
 1. Clone the repository:
 ```bash
-git clone [repository-url]
+git clone https://github.com/Agame7k/Timelapse-project.git
 ```
 
 2. Install dependencies:
