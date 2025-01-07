@@ -3,7 +3,7 @@ cred.env
 *.json
 
 # Photo directories
-timelapse_photos_backup/
+captured
 timelapse_photos_primary/
 
 # Python
@@ -13,3 +13,4 @@ __pycache__/
 
 # Log files
 *.log
+logs/
