@@ -56,7 +56,6 @@ OWNER_ID=your_discord_id
 - `/toggle-motion` - Enable/disable motion detection
 - `/create_timelapse` - Create timelapse from captures
 - `/sync` - Sync files with SMB server
-- `/clear_cache` - Clear local capture storage
 - `/notifications` - Toggle Discord notifications
 - `/reboot_pi` - Reboot the Raspberry Pi system
 - `/kill` - Safely shutdown the system

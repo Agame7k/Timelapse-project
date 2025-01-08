@@ -97,16 +97,34 @@ class TimelapseCamera:
         self.setup_discord()
 
     def load_timesheet(self):
-        """Load timesheet data from JSON file"""
+        """Load timesheet data from JSON file and restore active session if exists"""
         try:
             if os.path.exists(self.timesheet_file):
                 with open(self.timesheet_file, 'r') as f:
                     self.timesheet_data = json.load(f)
+                    # Check for and restore active session
+                    if "active_session" in self.timesheet_data:
+                        session = self.timesheet_data["active_session"]
+                        if session:
+                            self.active_clock = {
+                                "start_time": datetime.strptime(session["start_time"], "%Y-%m-%d %H:%M:%S"),
+                                "auto_checkout_time": datetime.strptime(session["auto_checkout_time"], "%Y-%m-%d %H:%M:%S")
+                            }
+                    else:
+                        self.timesheet_data["active_session"] = None
             else:
-                self.timesheet_data = {"entries": [], "total_hours": 0}
+                self.timesheet_data = {
+                    "entries": [], 
+                    "total_hours": 0,
+                    "active_session": None
+                }
         except Exception as e:
             logger.error(f"Failed to load timesheet: {str(e)}")
-            self.timesheet_data = {"entries": [], "total_hours": 0}
+            self.timesheet_data = {
+                "entries": [], 
+                "total_hours": 0,
+                "active_session": None
+            }
 
     def save_timesheet(self):
         """Save timesheet data to JSON file"""
@@ -153,6 +171,7 @@ class TimelapseCamera:
         except Exception as e:
             logger.error(f"Initialization failed: {e}")
             return False
+    
     
     def setup_discord(self):
         """Initialize Discord bot and commands"""
@@ -229,6 +248,23 @@ class TimelapseCamera:
             except Exception as e:
                 logger.error(f"Error during bot startup: {str(e)}")
 
+        def create_progress_bar(value, max_value, length=10):
+            """Create a progress bar with custom length"""
+            filled = int(value / max_value * length)
+            bar = '█' * filled + '░' * (length - filled)
+            return bar
+
+        def get_folder_size(pattern):
+            """Get total size of folders matching pattern in bytes"""
+            total = 0
+            for folder in glob.glob(pattern):
+                if os.path.isdir(folder):
+                    for path, dirs, files in os.walk(folder):
+                        for f in files:
+                            total += os.path.getsize(os.path.join(path, f))
+            return total
+
+
         @self.tree.command(name="toggle-motion", description="Toggle motion monitoring")
         async def toggle_monitoring(interaction: discord.Interaction):
             self.is_monitoring = not self.is_monitoring
@@ -269,154 +305,141 @@ class TimelapseCamera:
             await interaction.response.defer()
             
             try:
-                # Import required modules for system info
                 import psutil
                 import platform
-                from datetime import datetime
                 
-                # System Platform Info
-                system_info = {
-                    'system': platform.system(),
-                    'node': platform.node(),
-                    'release': platform.release(),
-                    'version': platform.version(),
-                    'machine': platform.machine(),
-                    'processor': platform.processor()
-                }
-                
-                # CPU Info
-                cpu_info = {
-                    'usage': psutil.cpu_percent(interval=1),
-                    'cores': psutil.cpu_count(logical=False),
-                    'threads': psutil.cpu_count(logical=True),
-                    'freq': psutil.cpu_freq().current if hasattr(psutil.cpu_freq(), 'current') else 0
-                }
-                
-                # Memory Info
+                # System Hardware Stats
+                cpu_freq = psutil.cpu_freq()
+                cpu_count = psutil.cpu_count()
+                cpu_percent = psutil.cpu_percent(interval=1, percpu=True)
                 memory = psutil.virtual_memory()
-                memory_info = {
-                    'total': memory.total,
-                    'available': memory.available,
-                    'used': memory.used,
-                    'percent': memory.percent
-                }
-                
-                # Disk Info
                 disk = psutil.disk_usage('/')
-                disk_info = {
-                    'total': disk.total,
-                    'used': disk.used,
-                    'free': disk.free,
-                    'percent': disk.percent
-                }
+                temps = psutil.sensors_temperatures() if hasattr(psutil, 'sensors_temperatures') else {}
+                network = psutil.net_io_counters()
+                boot_time = datetime.fromtimestamp(psutil.boot_time())
                 
-                # Count files in capture directories
-                total_captures = 0
-                capture_folders = glob.glob('captures_*')
-                for folder in capture_folders:
-                    if os.path.isdir(folder):
-                        total_captures += len([f for f in os.listdir(folder) if f.endswith('.jpg')])
+                # Image Stats
+                captures_today = len(glob.glob(f"captures_{datetime.now().strftime('%Y%m%d')}/*.jpg"))
+                total_captures = sum(len(glob.glob(f"{f}/*.jpg")) for f in glob.glob('captures_*'))
+                timelapse_photos = len(glob.glob('timelapse_photos_primary/*.jpg'))
                 
-                # Count timelapse photos
-                timelapse_photos = 0
-                if os.path.exists('timelapse_photos_primary'):
-                    timelapse_photos = len([f for f in os.listdir('timelapse_photos_primary') if f.endswith('.jpg')])
+                # Calculate uptime
+                uptime = time_module.time() - self.start_time
+                uptime_str = f"{int(uptime // 3600)}h {int((uptime % 3600) // 60)}m {int(uptime % 60)}s"
                 
-                # Get system uptime
-                system_uptime = datetime.now() - datetime.fromtimestamp(psutil.boot_time())
-                bot_uptime = time_module.time() - self.start_time
+                def format_size(size):
+                    for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+                        if size < 1024.0:
+                            return f"{size:.1f}{unit}"
+                        size /= 1024.0
                 
-                # Create rich embed
+                # Main embed with system overview
                 embed = discord.Embed(
-                    title="🖥️ System Status Dashboard",
-                    description="Comprehensive system status and monitoring information",
-                    color=discord.Color.blue(),
+                    title="System Status Dashboard",
+                    description=(
+                        f"**System Health Overview**\n"
+                        f"🟢 System Online | "
+                        f"💻 {cpu_percent[0]:.1f}% CPU | "
+                        f"🔧 {memory.percent}% RAM | "
+                        f"💾 {disk.percent}% Disk"
+                    ),
+                    color=discord.Color.brand_green(),
                     timestamp=datetime.now()
+)
+
+                # System Information
+                sys_info = (
+                    f"```ml\n"
+                    f"Hostname   : {platform.node()}\n"
+                    f"OS         : {platform.system()} {platform.release()}\n"
+                    f"Boot Time  : {boot_time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+                    f"Uptime     : {uptime_str}\n"
+                    f"Python     : v{platform.python_version()}\n"
+                    f"OpenCV     : v{cv2.__version__}\n"
+                    f"Discord.py : v{discord.__version__}\n"
+                    f"```"
                 )
-                
-                # System Information Section
-                embed.add_field(
-                    name="🔧 System Information",
-                    value=f"```\n"
-                        f"OS: {system_info['system']} {system_info['release']}\n"
-                        f"Host: {system_info['node']}\n"
-                        f"Architecture: {system_info['machine']}\n"
-                        f"Python: {platform.python_version()}\n"
-                        f"```",
-                    inline=False
+                embed.add_field(name="🖥️ System Information", value=sys_info, inline=False)
+
+                # Resource Metrics
+                metrics = (
+                    f"```ml\n"
+                    f"CPU Usage    : {create_progress_bar(cpu_percent[0], 100, 15)} {cpu_percent[0]:>5.1f}%\n"
+                    f"Memory Usage : {create_progress_bar(memory.percent, 100, 15)} {memory.percent:>5.1f}%\n"
+                    f"Disk Usage   : {create_progress_bar(disk.percent, 100, 15)} {disk.percent:>5.1f}%\n"
+                    f"```"
                 )
-                
-                # CPU Status
-                cpu_status = "🟢" if cpu_info['usage'] < 70 else "🟡" if cpu_info['usage'] < 90 else "🔴"
-                embed.add_field(
-                    name=f"{cpu_status} CPU Status",
-                    value=f"```\n"
-                        f"Usage: {cpu_info['usage']}%\n"
-                        f"Cores: {cpu_info['cores']} ({cpu_info['threads']} threads)\n"
-                        f"Frequency: {cpu_info['freq']/1000:.1f} GHz\n"
-                        f"```",
-                    inline=True
+                embed.add_field(name="📊 Resource Metrics", value=metrics, inline=False)
+
+                # Hardware Details
+                hw_info = (
+                    f"```ml\n"
+                    f"CPU Model : {platform.processor()[:40]}...\n"
+                    f"Cores     : {cpu_count} ({psutil.cpu_count(logical=False)} physical)\n"
+                    f"Memory    : {format_size(memory.total)} ({format_size(memory.used)} used)\n"
+                    f"Disk      : {format_size(disk.total)} ({format_size(disk.free)} free)\n"
+                    f"Network   : ↓ {format_size(network.bytes_recv)} | ↑ {format_size(network.bytes_sent)}\n"
+                    f"```"
                 )
-                
-                # Memory Status
-                mem_status = "🟢" if memory_info['percent'] < 70 else "🟡" if memory_info['percent'] < 90 else "🔴"
-                embed.add_field(
-                    name=f"{mem_status} Memory Status",
-                    value=f"```\n"
-                        f"Used: {memory_info['used']/1024**3:.1f}GB\n"
-                        f"Free: {memory_info['available']/1024**3:.1f}GB\n"
-                        f"Total: {memory_info['total']/1024**3:.1f}GB\n"
-                        f"```",
-                    inline=True
+                embed.add_field(name="💻 Hardware", value=hw_info, inline=False)
+
+                # Camera Status
+                motion_time = "Never" if self.last_motion_time == 0 else f"{int(time_module.time() - self.last_motion_time)}s ago"
+                camera = (
+                    f"```ml\n"
+                    f"Status      : {'🟢 Connected' if self.camera.isOpened() else '🔴 Disconnected'}\n"
+                    f"Mode        : {'📸 Active' if self.is_monitoring else '⏸️ Paused'}\n"
+                    f"Last Motion : {motion_time}\n"
+                    f"Settings    : {self.motion_threshold} threshold, {self.min_area}px min area\n"
+                    f"Alerts      : {'🔔 Enabled' if self.notifications_enabled else '🔕 Disabled'}\n"
+                    f"```"
                 )
-                
-                # Storage Status
-                storage_status = "🟢" if disk_info['percent'] < 70 else "🟡" if disk_info['percent'] < 90 else "🔴"
-                embed.add_field(
-                    name=f"{storage_status} Storage Status",
-                    value=f"```\n"
-                        f"Used: {disk_info['used']/1024**3:.1f}GB\n"
-                        f"Free: {disk_info['free']/1024**3:.1f}GB\n"
-                        f"Total: {disk_info['total']/1024**3:.1f}GB\n"
-                        f"```",
-                    inline=True
+                embed.add_field(name="📸 Camera Status", value=camera, inline=False)
+
+                # Storage Statistics
+                storage_used = get_folder_size('captures_*')
+                timelapse_used = get_folder_size('timelapse_photos_primary')
+                stats = (
+                    f"```ml\n"
+                    f"Today's Captures : {captures_today:,} images\n"
+                    f"Total Captures  : {total_captures:,} images\n"
+                    f"Storage Used    : {format_size(storage_used + timelapse_used)}\n"
+                    f"Capture Rate    : {captures_today / ((time_module.time() - self.start_time) / 3600):.1f} img/hour\n"
+                    f"```"
                 )
-                
-                # Camera Status Section
-                embed.add_field(
-                    name="📸 Camera Status",
-                    value=f"```\n"
-                        f"Monitoring: {'Active' if self.is_monitoring else 'Paused'}\n"
-                        f"Notifications: {'Enabled' if self.notifications_enabled else 'Disabled'}\n"
-                        f"Last Motion: {self.format_last_motion_time()}\n"
-                        f"Capture Count: {total_captures:,} images\n"
-                        f"Timelapse Photos: {timelapse_photos:,} images\n"
-                        f"```",
-                    inline=False
+                embed.add_field(name="📁 Storage Statistics", value=stats, inline=False)
+
+                # Temperature Monitoring (if available)
+                if temps:
+                    temp_info = "```ml\n"
+                    for sensor_name, entries in temps.items():
+                        for entry in entries:
+                            status = '🟢' if entry.current < 60 else '🟡' if entry.current < 80 else '🔴'
+                            temp_info += f"{sensor_name:<12}: {status} {entry.current:>5.1f}°C"
+                            if entry.high:
+                                temp_info += f" (max: {entry.high:>5.1f}°C)\n"
+                    temp_info += "```"
+                    embed.add_field(name="🌡️ Temperature", value=temp_info, inline=False)
+
+                # Network Status
+                net_status = (
+                    f"```ml\n"
+                    f"Discord : {'🟢 Connected' if self.discord_client.is_ready() else '🔴 Disconnected'}\n"
+                    f"Latency : {round(self.discord_client.latency * 1000)}ms\n"
+                    f"SMB     : {'🟢 Connected' if self.smb_client else '🔴 Disconnected'}\n"
+                    f"```"
                 )
-                
-                # Uptime Information
-                hours, remainder = divmod(int(bot_uptime), 3600)
-                minutes, seconds = divmod(remainder, 60)
-                sys_days = system_uptime.days
-                sys_hours, remainder = divmod(system_uptime.seconds, 3600)
-                sys_minutes, sys_seconds = divmod(remainder, 60)
-                
-                embed.add_field(
-                    name="⏰ Uptime Information",
-                    value=f"```\n"
-                        f"Bot: {hours}h {minutes}m {seconds}s\n"
-                        f"System: {sys_days}d {sys_hours}h {sys_minutes}m\n"
-                        f"```",
-                    inline=False
-                )
-                
+                embed.add_field(name="🌐 Network Status", value=net_status, inline=False)
+
                 # Add footer with refresh info
-                embed.set_footer(text=f"Status refreshed at {datetime.now().strftime('%H:%M:%S')} • Use /status to refresh")
-                
+                embed.set_footer(
+                    text=f"Last Updated: {datetime.now().strftime('%H:%M:%S')} • Refresh with /status",
+                    icon_url="https://i.imgur.com/XwK0v9F.png"  # Optional: Add a small icon
+                )
+
                 await interaction.followup.send(embed=embed)
-                logger.info(f"Detailed status requested by {interaction.user}")
-                
+                logger.info(f"Status requested by {interaction.user}")
+
             except Exception as e:
                 error_embed = discord.Embed(
                     title="❌ Status Error",
@@ -1042,10 +1065,28 @@ class TimelapseCamera:
                 await interaction.response.send_message("Only the owner can use this command.", ephemeral=True)
                 return
 
+            # Check if there's already an active session
+            if self.active_clock or self.timesheet_data.get("active_session"):
+                embed = discord.Embed(
+                    title="⚠️ Clock Already Active",
+                    description="You already have an active time tracking session",
+                    color=discord.Color.yellow(),
+                    timestamp=datetime.now()
+                )
+                if self.active_clock:
+                    start = self.active_clock["start_time"]
+                    duration = (datetime.now() - start).total_seconds() / 3600
+                    embed.add_field(
+                        name="Current Session",
+                        value=f"Started: {start.strftime('%I:%M %p')}\nDuration: {round(duration, 2)} hours",
+                        inline=False
+                    )
+                await interaction.response.send_message(embed=embed, ephemeral=True)
+                return
+
             current_time = datetime.now()
             if start_time:
                 try:
-                    # Parse provided time
                     hour, minute = map(int, start_time.split(':'))
                     start_datetime = current_time.replace(hour=hour, minute=minute)
                 except:
@@ -1054,10 +1095,22 @@ class TimelapseCamera:
             else:
                 start_datetime = current_time
 
+            auto_checkout_datetime = start_datetime + timedelta(hours=auto_checkout_hours)
+            
+            # Create active session
             self.active_clock = {
                 "start_time": start_datetime,
-                "auto_checkout_time": start_datetime + timedelta(hours=auto_checkout_hours)
+                "auto_checkout_time": auto_checkout_datetime
             }
+            
+            # Store in timesheet data
+            self.timesheet_data["active_session"] = {
+                "start_time": start_datetime.strftime("%Y-%m-%d %H:%M:%S"),
+                "auto_checkout_time": auto_checkout_datetime.strftime("%Y-%m-%d %H:%M:%S")
+            }
+            
+            # Save immediately
+            self.save_timesheet()
 
             embed = discord.Embed(
                 title="🕐 Clock Started",
@@ -1068,10 +1121,10 @@ class TimelapseCamera:
             embed.add_field(name="Start Time", value=start_datetime.strftime("%I:%M %p"), inline=True)
             embed.add_field(name="Auto Checkout", value=f"In {auto_checkout_hours} hours", inline=True)
             
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+            await interaction.response.send_message(embed=embed)
             
             # Schedule auto-checkout
-            await asyncio.sleep((self.active_clock["auto_checkout_time"] - datetime.now()).total_seconds())
+            await asyncio.sleep((auto_checkout_datetime - datetime.now()).total_seconds())
             if self.active_clock:  # If still active
                 await self.auto_checkout(interaction.user)
 
@@ -1085,7 +1138,7 @@ class TimelapseCamera:
                 return
 
             if not self.active_clock:
-                await interaction.response.send_message("No active clock session found.", ephemeral=True)
+                await interaction.response.send_message("No active clock session found.")
                 return
 
             current_time = datetime.now()
@@ -1115,8 +1168,11 @@ class TimelapseCamera:
                 sum(entry["duration"] for entry in self.timesheet_data["entries"]), 2
             )
             
-            self.save_timesheet()
+            # Clear active session
             self.active_clock = None
+            self.timesheet_data["active_session"] = None
+            
+            self.save_timesheet()
 
             embed = discord.Embed(
                 title="⏱️ Clock Stopped",
@@ -1126,46 +1182,95 @@ class TimelapseCamera:
             )
             embed.add_field(name="Duration", value=f"{round(duration, 2)} hours", inline=True)
             
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+            await interaction.response.send_message(embed=embed)
 
-        @self.tree.command(name="timesheet_stats", description="View timesheet statistics")
-        async def timesheet_stats(interaction: discord.Interaction):
+        @self.tree.command(name="timesheet_stats", description="View timesheet statistics for all or specific date")
+        async def timesheet_stats(
+            interaction: discord.Interaction,
+            specific_date: str = None  # Optional date parameter in YYYY-MM-DD format
+        ):
             if interaction.user.id != self.owner_id:
                 await interaction.response.send_message("Only the owner can use this command.", ephemeral=True)
                 return
-
-            # Calculate weekly hours
-            current_week = datetime.now().isocalendar()[1]
-            weekly_hours = sum(
-                entry["duration"] for entry in self.timesheet_data["entries"]
-                if datetime.strptime(entry["date"], "%Y-%m-%d").isocalendar()[1] == current_week
-            )
-
-            # Format total time
-            total_hours = self.timesheet_data["total_hours"]
-            days = total_hours // 24
-            weeks = days // 7
-            remaining_days = days % 7
-            remaining_hours = total_hours % 24
 
             embed = discord.Embed(
                 title="📊 Timesheet Statistics",
                 color=discord.Color.blue(),
                 timestamp=datetime.now()
             )
-            
-            embed.add_field(
-                name="This Week",
-                value=f"{round(weekly_hours, 2)} hours",
-                inline=False
-            )
-            
-            embed.add_field(
-                name="Total Time",
-                value=f"{int(weeks)} weeks, {int(remaining_days)} days, {round(remaining_hours, 2)} hours",
-                inline=False
-            )
-            
+
+            # If specific date is provided, validate and show stats for that day
+            if specific_date:
+                try:
+                    # Validate date format
+                    datetime.strptime(specific_date, "%Y-%m-%d")
+                    
+                    # Get entries for specific date
+                    day_entries = [
+                        entry for entry in self.timesheet_data["entries"]
+                        if entry["date"] == specific_date
+                    ]
+                    
+                    if day_entries:
+                        total_day_hours = sum(entry["duration"] for entry in day_entries)
+                        
+                        embed.add_field(
+                            name=f"📅 {specific_date}",
+                            value=f"Total Hours: {round(total_day_hours, 2)}",
+                            inline=False
+                        )
+                        
+                        # Add detailed entries
+                        entries_text = ""
+                        for entry in day_entries:
+                            auto_checkout = "🤖" if entry["auto_checkout"] else "👤"
+                            entries_text += f"{entry['time_in']} - {entry['time_out']} ({entry['duration']}h) {auto_checkout}\n"
+                        
+                        embed.add_field(
+                            name="⏰ Time Entries",
+                            value=f"```\n{entries_text}```",
+                            inline=False
+                        )
+                    else:
+                        embed.add_field(
+                            name="❌ No Data",
+                            value=f"No entries found for {specific_date}",
+                            inline=False
+                        )
+                except:
+                    embed.add_field(
+                        name="❌ Invalid Date",
+                        value="Date format must be YYYY-MM-DD",
+                        inline=False
+                    )
+            else:
+                # Calculate weekly hours
+                current_week = datetime.now().isocalendar()[1]
+                weekly_hours = sum(
+                    entry["duration"] for entry in self.timesheet_data["entries"]
+                    if datetime.strptime(entry["date"], "%Y-%m-%d").isocalendar()[1] == current_week
+                )
+                
+                embed.add_field(
+                    name="This Week",
+                    value=f"{round(weekly_hours, 2)} hours",
+                    inline=False
+                )
+                
+                # Format total time
+                total_hours = self.timesheet_data["total_hours"]
+                days = total_hours // 24
+                weeks = days // 7
+                remaining_days = days % 7
+                remaining_hours = total_hours % 24
+                
+                embed.add_field(
+                    name="Total Time",
+                    value=f"{int(weeks)} weeks, {int(remaining_days)} days, {round(remaining_hours, 2)} hours",
+                    inline=False
+                )
+
+            # Show current session if active
             if self.active_clock:
                 current_duration = (datetime.now() - self.active_clock["start_time"]).total_seconds() / 3600
                 embed.add_field(
@@ -1174,7 +1279,9 @@ class TimelapseCamera:
                     inline=False
                 )
 
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+            await interaction.response.send_message(embed=embed)
+
+
 
     def format_uptime(self):
         """Format the system uptime"""
