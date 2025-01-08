@@ -136,7 +136,7 @@ class TimelapseCamera:
         except Exception as e:
             logger.error(f"Failed to save timesheet: {str(e)}")
 
-    @tasks.loop(time=time(hour=18, minute=25)) #18:25 UTC = 13:25 CDT
+    @tasks.loop(time=time(hour=19, minute=25)) #19:25 UTC = 13:25 CDT
     async def reminder_task(self):
         """Send daily reminder at 1:25 PM on weekdays"""
         if datetime.now().weekday() < 5:  # 0-4 are Monday to Friday
@@ -1281,8 +1281,6 @@ class TimelapseCamera:
 
             await interaction.response.send_message(embed=embed)
 
-
-
     def format_uptime(self):
         """Format the system uptime"""
         uptime = time_module.time() - self.start_time
@@ -1585,7 +1583,7 @@ class TimelapseCamera:
             await asyncio.sleep(0.1)
 
     async def scheduled_capture(self):
-        """Take scheduled snapshots every 30 minutes"""
+        """Take scheduled snapshots every 10 minutes"""
         logger.info("Starting scheduled capture task")
         
         while True:
@@ -1613,7 +1611,7 @@ class TimelapseCamera:
                     logger.error(f"Error in scheduled capture: {str(e)}")
                     
             # Wait for 30 minutes
-            await asyncio.sleep(1800)  # 30 minutes = 1800 seconds
+            await asyncio.sleep(600)  # 30 minutes = 1800 seconds
 
     async def run_camera(self):
         """Run the camera monitoring"""
