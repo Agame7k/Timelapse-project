@@ -13,7 +13,7 @@ A Python-based camera monitoring system with Discord integration, motion detecti
 - ⏱️ Scheduled capture every 30 minutes
 - 🔔 Configurable Discord notifications
 - 📊 System monitoring and statistics
-- 📝 Timesheet tracking and statistics
+- 📝 Timesheet tracking and statistics (with reminder at your choice (mine is 1:25 PM)
 
 ## Requirements
 
