@@ -1,6 +1,8 @@
 # Timelapse Camera Monitoring System
 
 A Python-based camera monitoring system with Discord integration, motion detection, and automated timelapse creation capabilities.
+> **⚠️ Note:**
+> This script was developed for a specific robotics timelapse setup and will likely need modifications to suit your requirements. The code is provided as-is and may require adjustments for different environments or use cases.
 
 ## Features
 
@@ -11,6 +13,7 @@ A Python-based camera monitoring system with Discord integration, motion detecti
 - ⏱️ Scheduled capture every 30 minutes
 - 🔔 Configurable Discord notifications
 - 📊 System monitoring and statistics
+- 📝 Timesheet tracking and statistics
 
 ## Requirements
 
@@ -43,6 +46,7 @@ SMB_PORT=445
 SMB_SHARE_NAME=your_share_name
 CLIENT_NAME=your_client_name
 SERVER_NAME=your_server_name
+OWNER_ID=your_discord_id
 ```
 
 ## Discord Commands
@@ -56,6 +60,9 @@ SERVER_NAME=your_server_name
 - `/notifications` - Toggle Discord notifications
 - `/reboot_pi` - Reboot the Raspberry Pi system
 - `/kill` - Safely shutdown the system
+- `/start_clock` - starts time tracking
+- `/stop_clock` - stops time tracking
+- `/timesheet_stats` - view timesheet statistics
 
 ## Usage
 

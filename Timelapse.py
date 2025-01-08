@@ -1,11 +1,12 @@
 # main.py
 import os
-import time
-from datetime import datetime
+import time as time_module
+from datetime import datetime, timedelta, time
 import logging
 from dotenv import load_dotenv
 import discord
 from discord import app_commands
+from discord.ext import tasks
 import asyncio
 import cv2
 from smb.SMBConnection import SMBConnection
@@ -13,6 +14,9 @@ from PIL import Image
 import io
 import sys
 import glob
+import json
+from pathlib import Path
+
 
 # Load environment variables
 load_dotenv('cred.env')
@@ -35,9 +39,15 @@ class TimelapseCamera:
         self.is_monitoring = False
         self.is_ready = False
         self.is_fully_initialized = False
-        self.start_time = time.time()
+        self.start_time = time_module.time()
         self.last_capture_time = 0
         self.capture_interval = 60
+        self.notifications_enabled = True
+        self.timesheet_data = {}
+        self.active_clock = None
+        self.owner_id = int(os.getenv('OWNER_ID'))  # Add OWNER_ID to your cred.env
+        self.timesheet_file = "timesheet.json"
+        self.load_timesheet()
         
         # Discord initialization
         self.discord_client = discord.Client(intents=discord.Intents.all())
@@ -86,6 +96,44 @@ class TimelapseCamera:
         # Set up Discord
         self.setup_discord()
 
+    def load_timesheet(self):
+        """Load timesheet data from JSON file"""
+        try:
+            if os.path.exists(self.timesheet_file):
+                with open(self.timesheet_file, 'r') as f:
+                    self.timesheet_data = json.load(f)
+            else:
+                self.timesheet_data = {"entries": [], "total_hours": 0}
+        except Exception as e:
+            logger.error(f"Failed to load timesheet: {str(e)}")
+            self.timesheet_data = {"entries": [], "total_hours": 0}
+
+    def save_timesheet(self):
+        """Save timesheet data to JSON file"""
+        try:
+            with open(self.timesheet_file, 'w') as f:
+                json.dump(self.timesheet_data, f, indent=4)
+            # Upload to SMB
+            asyncio.create_task(self.upload_to_smb(self.timesheet_file))
+        except Exception as e:
+            logger.error(f"Failed to save timesheet: {str(e)}")
+
+    @tasks.loop(time=time(hour=13, minute=25))
+    async def reminder_task(self):
+        """Send daily reminder at 1:25 PM on weekdays"""
+        if datetime.now().weekday() < 5:  # 0-4 are Monday to Friday
+            try:
+                owner = await self.discord_client.fetch_user(self.owner_id)
+                if owner:
+                    embed = discord.Embed(
+                        title="⏰ Clock-In Reminder",
+                        description="Don't forget to clock in! Use `/start_clock` to begin tracking time.",
+                        color=discord.Color.blue()
+                    )
+                    await owner.send(embed=embed)
+            except Exception as e:
+                logger.error(f"Failed to send reminder: {str(e)}")
+
     async def initialize(self):
         """Initialize the system fully"""
         try:
@@ -97,8 +145,10 @@ class TimelapseCamera:
             self.is_ready = True
             self.is_monitoring = True
             self.is_fully_initialized = True
-            logger.info("System fully initialized")
             
+            logger.info("System fully initialized")
+            self.reminder_task.start()
+        
             return True
         except Exception as e:
             logger.error(f"Initialization failed: {e}")
@@ -107,6 +157,7 @@ class TimelapseCamera:
     def setup_discord(self):
         """Initialize Discord bot and commands"""
         @self.discord_client.event
+
         async def on_ready():
             try:
                 await self.tree.sync()
@@ -124,11 +175,10 @@ class TimelapseCamera:
                     return
                 
                 activity = discord.Activity(
-                    status=discord.Status.dnd,
                     type=discord.ActivityType.watching,
-                    name="ROBOTS IN THE MAKING"
+                    name="ROBOTS"
                 )
-                await self.discord_client.change_presence(activity=activity)
+                await self.discord_client.change_presence(status=discord.Status.dnd, activity=activity)
                 logger.info(f'Discord bot logged in as {self.discord_client.user}')
                 startup_embed = discord.Embed(
                 title="🤖 Bot Online",
@@ -152,7 +202,7 @@ class TimelapseCamera:
                     value=f"```\n"
                         f"Monitoring: {'Active' if self.is_monitoring else 'Paused'}\n"
                         f"Camera: {'Connected' if self.camera.isOpened() else 'Error'}\n"
-                        f"Notifications: {'Enabled' if self.notification_enabled else 'Disabled'}\n"
+                        f"Notifications: {'Enabled' if self.notifications_enabled else 'Disabled'}\n"
                         f"```",
                     inline=True
                 )
@@ -189,7 +239,7 @@ class TimelapseCamera:
                 status=discord.Status.dnd if self.is_monitoring else discord.Status.idle,
                 activity=discord.Activity(
                     type=discord.ActivityType.watching if self.is_monitoring else discord.ActivityType.listening,
-                    name="ROBOTS IN THE MAKING" if self.is_monitoring else "cause im blind"
+                    name="ROBOTS" if self.is_monitoring else "cause im blind"
                 )
             )
             
@@ -274,7 +324,7 @@ class TimelapseCamera:
                 
                 # Get system uptime
                 system_uptime = datetime.now() - datetime.fromtimestamp(psutil.boot_time())
-                bot_uptime = time.time() - self.start_time
+                bot_uptime = time_module.time() - self.start_time
                 
                 # Create rich embed
                 embed = discord.Embed(
@@ -380,7 +430,7 @@ class TimelapseCamera:
         async def snapshot(interaction: discord.Interaction):
             await interaction.response.defer()
             logger.info("Taking snapshot")
-            start_time = time.time()
+            start_time = time_module.time()
             
             ret, frame = self.camera.read()
             if not ret:
@@ -422,7 +472,7 @@ class TimelapseCamera:
             )
             embed.add_field(
                 name="Processing Time",
-                value=f"{(time.time() - start_time):.2f}s",
+                value=f"{(time_module.time() - start_time):.2f}s",
                 inline=True
             )
             embed.set_image(url="attachment://snapshot.jpg")
@@ -499,14 +549,6 @@ class TimelapseCamera:
                 inline=False
             )
             
-            confirm_embed.add_field(
-                name="⚠️ Warning",
-                value="This will:\n• Stop all motion monitoring\n• Close camera connections\n• End Discord integration\n• Shutdown the bot process",
-                inline=False
-            )
-            
-            confirm_embed.set_footer(text="Click Confirm to proceed with shutdown")
-
             # Create confirm/cancel buttons
             confirm_button = discord.ui.Button(
                 style=discord.ButtonStyle.danger,
@@ -523,77 +565,21 @@ class TimelapseCamera:
             )
 
             async def confirm_callback(interaction: discord.Interaction):
-                # Create shutdown embed
-                shutdown_embed = discord.Embed(
-                    title="🔌 System Shutdown Initiated",
-                    description="Beginning shutdown sequence...",
-                    color=discord.Color.red(),
-                    timestamp=datetime.now()
-                )
-
-                shutdown_embed.add_field(
-                    name="📊 Final Status",
-                    value=f"""```
-        Uptime: {self.format_uptime()}
-        Total Captures: {sum(len(files) for _, _, files in os.walk('captures_'))} files
-        Last Motion: {self.format_last_motion_time()}
-        Camera Status: {'Connected' if self.camera.isOpened() else 'Disconnected'}```""",
-                    inline=False
-                )
-
-                shutdown_embed.add_field(
-                    name="👤 Triggered By",
-                    value=interaction.user.mention,
-                    inline=True
-                )
-
-                shutdown_embed.add_field(
-                    name="⏰ Timestamp",
-                    value=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    inline=True
-                )
-
-                # Add system resource usage
-                import psutil
-                process = psutil.Process()
-                shutdown_embed.add_field(
-                    name="🖥️ Resource Usage",
-                    value=f"""```
-        CPU: {psutil.cpu_percent()}%
-        Memory: {process.memory_percent():.1f}%
-        Threads: {process.num_threads()}
-        Handle Count: {process.num_handles() if os.name == 'nt' else 'N/A'}```""",
-                    inline=False
-                )
-
-                shutdown_embed.set_footer(text="System shutting down... Goodbye! 👋")
-                
-                # Disable all buttons
                 for child in view.children:
                     child.disabled = True
+                await interaction.response.edit_message(view=view)
                 
-                await interaction.response.edit_message(embed=shutdown_embed, view=view)
-                
-                # Log shutdown
-                logger.info(f"System shutdown initiated by {interaction.user}")
-                
-                # Cleanup and exit
-                self.cleanup()
-                await self.discord_client.close()
-                os._exit(0)
+                # Execute shutdown sequence
+                await self.shutdown_sequence()
 
             async def cancel_callback(interaction: discord.Interaction):
                 cancel_embed = discord.Embed(
                     title="✅ Shutdown Cancelled",
                     description="System will continue running normally",
-                    color=discord.Color.green(),
-                    timestamp=datetime.now()
+                    color=discord.Color.green()
                 )
-                
-                # Disable all buttons
                 for child in view.children:
                     child.disabled = True
-                    
                 await interaction.response.edit_message(embed=cancel_embed, view=view)
 
             # Set up button callbacks
@@ -605,7 +591,7 @@ class TimelapseCamera:
             view.add_item(confirm_button)
             view.add_item(cancel_button)
 
-            # Send initial confirmation message
+            # Send confirmation message
             await interaction.response.send_message(embed=confirm_embed, view=view)
 
             # Handle timeout
@@ -613,14 +599,10 @@ class TimelapseCamera:
                 timeout_embed = discord.Embed(
                     title="⏰ Shutdown Cancelled",
                     description="Confirmation timed out after 30 seconds",
-                    color=discord.Color.greyple(),
-                    timestamp=datetime.now()
+                    color=discord.Color.greyple()
                 )
-                
-                # Disable all buttons
                 for child in view.children:
                     child.disabled = True
-                    
                 await interaction.edit_original_response(embed=timeout_embed, view=view)
 
             view.on_timeout = on_timeout
@@ -628,55 +610,133 @@ class TimelapseCamera:
         @self.tree.command(name="create_timelapse", description="Create timelapse from motion captures")
         async def create_timelapse(
             interaction: discord.Interaction,
-            fps: int = 30,
-            date: str = None
+            fps: int = 60,
+            specific_date: str = None  # Changed from date to specific_date and made optional
         ):
             await interaction.response.defer()
             
+            # Initial embed
             embed = discord.Embed(
                 title="🎬 Creating Timelapse",
                 description="Processing captured images...",
                 color=discord.Color.blue(),
                 timestamp=datetime.now()
             )
+            embed.add_field(name="FPS", value=str(fps), inline=True)
             embed.add_field(
-                name="FPS",
-                value=str(fps),
-                inline=True
-            )
-            embed.add_field(
-                name="Date",
-                value=date if date else "Today",
+                name="Mode", 
+                value=f"Single Day: {specific_date}" if specific_date else "All Captures",
                 inline=True
             )
             
-            video_path = await self.create_timelapse_video(fps, date)
-            if video_path:
-                try:
-                    await self.upload_to_smb(video_path)
-                    embed.title = "✅ Timelapse Created"
-                    embed.description = "Video has been created and uploaded successfully"
-                    embed.color = discord.Color.green()
-                    embed.add_field(
-                        name="Output",
-                        value=f"`{video_path}`",
-                        inline=False
-                    )
-                except Exception as e:
-                    embed.title = "⚠️ Upload Failed"
-                    embed.description = "Video created but upload failed"
-                    embed.color = discord.Color.yellow()
-                    embed.add_field(
-                        name="Error",
-                        value=str(e),
-                        inline=False
-                    )
-            else:
-                embed.title = "❌ Timelapse Failed"
-                embed.description = "Failed to create timelapse video"
-                embed.color = discord.Color.red()
+            progress_message = await interaction.followup.send(embed=embed)
             
-            await interaction.followup.send(embed=embed)
+            try:
+                # Get all capture folders if no specific date
+                if specific_date:
+                    folders = [f"captures_{specific_date}"]
+                else:
+                    folders = sorted([f for f in glob.glob('captures_*') if os.path.isdir(f)])
+                
+                if not folders:
+                    embed.title = "❌ Timelapse Failed"
+                    embed.description = "No capture folders found"
+                    embed.color = discord.Color.red()
+                    await progress_message.edit(embed=embed)
+                    return
+                
+                # Count total images across all folders
+                total_images = 0
+                all_images = []
+                for folder in folders:
+                    if os.path.exists(folder):
+                        images = sorted([img for img in os.listdir(folder) if img.endswith(".jpg")])
+                        total_images += len(images)
+                        all_images.extend([os.path.join(folder, img) for img in images])
+                
+                if not total_images:
+                    embed.title = "❌ Timelapse Failed"
+                    embed.description = "No images found in capture folders"
+                    embed.color = discord.Color.red()
+                    await progress_message.edit(embed=embed)
+                    return
+                
+                embed.add_field(name="Total Images", value=str(total_images), inline=True)
+                await progress_message.edit(embed=embed)
+                
+                # Create video using first image dimensions
+                first_image = cv2.imread(all_images[0])
+                height, width, _ = first_image.shape
+                video_path = "complete_timelapse.mp4" if not specific_date else f"captures_{specific_date}_timelapse.mp4"
+                
+                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                video = cv2.VideoWriter(video_path, fourcc, fps, (width, height))
+                
+                # Process images with progress bar
+                for i, image_path in enumerate(all_images):
+                    video.write(cv2.imread(image_path))
+                    
+                    if i % 10 == 0 or i == total_images - 1:  # Update every 10 frames or on last frame
+                        progress = (i + 1) / total_images
+                        bar_length = 20
+                        filled_length = int(bar_length * progress)
+                        bar = '█' * filled_length + '░' * (bar_length - filled_length)
+                        
+                        embed.description = (
+                            f"Processing images... ({i+1}/{total_images})\n"
+                            f"`{bar}` {progress*100:.1f}%"
+                        )
+                        await progress_message.edit(embed=embed)
+                
+                video.release()
+                logger.info(f"Created timelapse video: {video_path}")
+                
+                # Upload to SMB
+                await self.upload_to_smb(video_path)
+                
+                # Create final embed with video
+                success_embed = discord.Embed(
+                    title="✅ Timelapse Created",
+                    description="Video has been created and uploaded successfully",
+                    color=discord.Color.green(),
+                    timestamp=datetime.now()
+                )
+                success_embed.add_field(name="FPS", value=str(fps), inline=True)
+                success_embed.add_field(name="Frame Count", value=str(total_images), inline=True)
+                success_embed.add_field(name="Duration", value=f"{total_images/fps:.1f}s", inline=True)
+                success_embed.add_field(
+                    name="Time Range",
+                    value=f"All captures" if not specific_date else f"Date: {specific_date}",
+                    inline=False
+                )
+                
+                # Attach video file if under Discord's file size limit (8MB for most servers)
+                if os.path.getsize(video_path) < 8_000_000:  # 8MB in bytes
+                    file = discord.File(video_path, filename="timelapse.mp4")
+                    success_embed.add_field(
+                        name="📹 Preview",
+                        value="Video attached below",
+                        inline=False
+                    )
+                    await progress_message.edit(embed=success_embed)
+                    await interaction.followup.send(file=file)
+                else:
+                    success_embed.add_field(
+                        name="📹 Video",
+                        value=f"Video size exceeds Discord's limit. Access it at: `{video_path}`",
+                        inline=False
+                    )
+                    await progress_message.edit(embed=success_embed)
+                
+            except Exception as e:
+                error_embed = discord.Embed(
+                    title="❌ Timelapse Failed",
+                    description=f"Error: {str(e)}",
+                    color=discord.Color.red(),
+                    timestamp=datetime.now()
+                )
+                await progress_message.edit(embed=error_embed)
+                logger.error(f"Failed to create timelapse: {str(e)}")
 
         @self.tree.command(name="reboot_pi", description="Reboot the Raspberry Pi system")
         async def reboot_pi(interaction: discord.Interaction):
@@ -705,14 +765,14 @@ class TimelapseCamera:
                 value=self.format_uptime(),
                 inline=True
             )
-            embed.set_footer(text="System will reboot in 10 seconds")
+            embed.set_footer(text="System will reboot in 5 seconds")
             
             await interaction.response.send_message(embed=embed)
             logger.info(f"System reboot initiated by {interaction.user}")
             
             # Create reboot script
             reboot_script = """#!/bin/bash
-        sleep 10
+        sleep 5
         sudo reboot
         rm -- "$0"
         """
@@ -731,213 +791,221 @@ class TimelapseCamera:
         @self.tree.command(name="sync", description="Sync files between Pi and SMB server")
         async def sync_files(interaction: discord.Interaction):
             await interaction.response.defer()
-            start_time = time.time()
+            start_time = time_module.time()
             
-            embed = discord.Embed(
-                title="🔄 Starting Sync",
-                description="Synchronizing files between Pi and SMB server...",
-                color=discord.Color.blue(),
-                timestamp=datetime.now()
-            )
-            await interaction.followup.send(embed=embed)
-            
-            try:
-                # Connect to SMB
-                if not self.smb_client.connect(
-                    os.getenv('SMB_SERVER_IP'),
-                    int(os.getenv('SMB_PORT', 445))
-                ):
-                    raise Exception("Failed to connect to SMB server")
-
-                share_name = os.getenv('SMB_SHARE_NAME')
-                local_dirs = ['captures_*', 'timelapse_photos_primary']
-                stats = {
-                    'uploaded': 0,
-                    'downloaded': 0,
-                    'skipped': 0,
-                    'errors': 0
-                }
-
-                # Sync each directory
-                for dir_pattern in local_dirs:
-                    for local_dir in glob.glob(dir_pattern):
-                        if not os.path.isdir(local_dir):
-                            continue
-
-                        # Create remote directory if it doesn't exist
-                        try:
-                            self.smb_client.createDirectory(share_name, local_dir)
-                        except:
-                            pass
-
-                        # Upload local files
-                        local_files = {f: os.path.getmtime(os.path.join(local_dir, f))
-                                    for f in os.listdir(local_dir)
-                                    if os.path.isfile(os.path.join(local_dir, f))}
-
-                        # Get remote files
-                        remote_files = {}
-                        try:
-                            file_list = self.smb_client.listPath(share_name, local_dir)
-                            for f in file_list:
-                                if f.isRegular:
-                                    remote_files[f.filename] = f.last_write_time
-                        except:
-                            logger.error(f"Failed to list remote directory: {local_dir}")
-                            continue
-
-                        # Upload new/modified local files
-                        for fname, local_mtime in local_files.items():
-                            try:
-                                if fname not in remote_files or local_mtime > remote_files[fname]:
-                                    local_path = os.path.join(local_dir, fname)
-                                    with open(local_path, 'rb') as file:
-                                        if self.smb_client.storeFile(share_name, f"{local_dir}/{fname}", file):
-                                            stats['uploaded'] += 1
-                                            logger.info(f"Uploaded: {local_path}")
-                                else:
-                                    stats['skipped'] += 1
-                            except Exception as e:
-                                logger.error(f"Error uploading {fname}: {str(e)}")
-                                stats['errors'] += 1
-
-                        # Download new remote files
-                        for fname, _ in remote_files.items():
-                            try:
-                                local_path = os.path.join(local_dir, fname)
-                                if fname not in local_files:
-                                    with open(local_path, 'wb') as file:
-                                        if self.smb_client.retrieveFile(share_name, f"{local_dir}/{fname}", file):
-                                            stats['downloaded'] += 1
-                                            logger.info(f"Downloaded: {local_path}")
-                            except Exception as e:
-                                logger.error(f"Error downloading {fname}: {str(e)}")
-                                stats['errors'] += 1
-
-                # Create summary embed
-                elapsed_time = time.time() - start_time
-                embed = discord.Embed(
-                    title="✅ Sync Complete",
-                    description="File synchronization completed",
-                    color=discord.Color.green(),
-                    timestamp=datetime.now()
-                )
-                embed.add_field(
-                    name="📤 Uploaded",
-                    value=str(stats['uploaded']),
-                    inline=True
-                )
-                embed.add_field(
-                    name="📥 Downloaded",
-                    value=str(stats['downloaded']),
-                    inline=True
-                )
-                embed.add_field(
-                    name="⏭️ Skipped",
-                    value=str(stats['skipped']),
-                    inline=True
-                )
-                if stats['errors'] > 0:
-                    embed.add_field(
-                        name="⚠️ Errors",
-                        value=str(stats['errors']),
-                        inline=True
-                    )
-                embed.add_field(
-                    name="⏱️ Time Taken",
-                    value=f"{elapsed_time:.1f}s",
-                    inline=True
-                )
-                embed.set_footer(text="Check logs for detailed information")
-
-                await interaction.followup.send(embed=embed)
-                logger.info(f"Sync completed in {elapsed_time:.1f}s")
-
-            except Exception as e:
+            # Get share name from environment variables
+            share_name = os.getenv('SMB_SHARE_NAME')
+            if not share_name:
                 error_embed = discord.Embed(
                     title="❌ Sync Failed",
-                    description=str(e),
+                    description="SMB_SHARE_NAME not found in environment variables",
                     color=discord.Color.red(),
                     timestamp=datetime.now()
                 )
                 await interaction.followup.send(embed=error_embed)
+                logger.error("SMB_SHARE_NAME not found in environment variables")
+                return
+            
+            
+            
+            progress_embed = discord.Embed(
+                title="🔄 Starting Sync",
+                description="Preparing to sync files...",
+                color=discord.Color.blue(),
+                timestamp=datetime.now()
+            )
+            progress_message = await interaction.followup.send(embed=progress_embed)
+            
+            try:
+                # Create new SMB connection for sync operation
+                smb = SMBConnection(
+                    os.getenv('SMB_USERNAME'),
+                    os.getenv('SMB_PASSWORD'),
+                    os.getenv('CLIENT_NAME'),
+                    os.getenv('SERVER_NAME'),
+                    use_ntlm_v2=True
+                )
+
+                if not smb.connect(
+                    os.getenv('SMB_SERVER_IP'),
+                    int(os.getenv('SMB_PORT', 445)),
+                    timeout=30
+                ):
+                    raise Exception("Failed to connect to SMB server")
+
+                # Verify share exists
+                remote_shares = smb.listShares()
+                if not any(share.name == share_name for share in remote_shares):
+                    raise Exception(f"Share '{share_name}' not found on server")
+
+                # Initialize stats
+                stats = {'uploaded': 0, 'downloaded': 0, 'skipped': 0, 'errors': 0}
+                total_files = 0
+                processed_files = 0
+
+                remote_files = {}
+                try:
+                    # Initialize remote_files dictionary
+                    remote_files = {}
+                    # Modify folder patterns to explicitly match directories and exclude mp4 files
+                    folder_patterns = {
+                        'captures_*': lambda x: os.path.isdir(x) and not x.endswith('.mp4'),
+                        'timelapse_photos_primary': os.path.isdir
+                    }
+                    
+                    # Process each folder pattern
+                    for pattern, is_valid_dir in folder_patterns.items():
+                        for current_dir in glob.glob(pattern):
+                            if not is_valid_dir(current_dir):
+                                logger.debug(f"Skipping non-directory: {current_dir}")
+                                continue
+                                
+                            try:
+                                # List files in remote directory
+                                file_list = smb.listPath(share_name, current_dir)
+                                for f in file_list:
+                                    # Check if it's a file (not a directory)
+                                    if not (f.file_attributes & 0x10):
+                                        remote_files[f.filename] = f.last_write_time
+                            except Exception as e:
+                                logger.error(f"Failed to list files in {current_dir}: {str(e)}")
+                                continue
+                except Exception as e:
+                    logger.error(f"Failed to list remote files: {str(e)}")
+                    raise
+                
+                # Count total files first
+                total_files = 0
+                for pattern, is_valid_dir in folder_patterns.items():
+                    for local_dir in glob.glob(pattern):
+                        if is_valid_dir(local_dir):
+                            total_files += len([f for f in os.listdir(local_dir) 
+                                            if os.path.isfile(os.path.join(local_dir, f))])
+
+                # Update progress message
+                progress_embed.description = f"Found {total_files} files to process"
+                await progress_message.edit(embed=progress_embed)
+                
+                # Process files with progress updates
+                for pattern, is_valid_dir in folder_patterns.items():
+                    for local_dir in glob.glob(pattern):
+                        if not is_valid_dir(local_dir):
+                            continue
+
+                        try:
+                            # Create remote directory if needed
+                            try:
+                                smb.listPath(share_name, local_dir)
+                            except:
+                                smb.createDirectory(share_name, local_dir)
+                                logger.info(f"Created remote directory: {local_dir}")
+
+                            # Get remote files list for current directory
+                            remote_files = {}
+                            try:
+                                file_list = smb.listPath(share_name, local_dir)
+                                for f in file_list:
+                                    # Check if it's a file (not a directory)
+                                    if not (f.file_attributes & 0x10):
+                                        remote_files[f.filename] = f.last_write_time
+                            except Exception as e:
+                                logger.error(f"Failed to list remote files in {local_dir}: {str(e)}")
+                                continue
+
+                            # Get local files
+                            local_files = {}
+                            for f in os.listdir(local_dir):
+                                if os.path.isfile(os.path.join(local_dir, f)):
+                                    local_files[f] = os.path.getmtime(os.path.join(local_dir, f))
+                            
+                            # Process each file
+                            update_interval = 5
+                            last_update = time_module.time()
+                            
+                            for i, (fname, local_mtime) in enumerate(local_files.items()):
+                                try:
+                                    # Upload if file is new or modified
+                                    if fname not in remote_files or local_mtime > remote_files[fname]:
+                                        local_path = os.path.join(local_dir, fname)
+                                        remote_path = f"{local_dir}/{fname}"
+                                        
+                                        with open(local_path, 'rb') as file:
+                                            if smb.storeFile(share_name, remote_path, file):
+                                                stats['uploaded'] += 1
+                                                logger.info(f"Uploaded: {remote_path}")
+                                    else:
+                                        stats['skipped'] += 1
+                                    
+                                    processed_files += 1
+                                    
+                                    # Update progress
+                                    if i % update_interval == 0 or (time_module.time() - last_update) > 2:
+                                        progress = (processed_files / total_files) * 100
+                                        elapsed_time = time_module.time() - start_time
+                                        eta = (elapsed_time / processed_files) * (total_files - processed_files) if processed_files > 0 else 0
+                                        
+                                        # Create progress bar
+                                        bar_length = 20
+                                        filled_length = int(bar_length * processed_files // total_files)
+                                        bar = '█' * filled_length + '░' * (bar_length - filled_length)
+                                        
+                                        progress_embed.description = (
+                                            f"Progress: {processed_files}/{total_files} files\n"
+                                            f"`{bar}` {progress:.1f}%\n"
+                                            f"ETA: {int(eta/60)}m {int(eta%60)}s\n"
+                                            f"```\n"
+                                            f"Uploaded: {stats['uploaded']}\n"
+                                            f"Skipped: {stats['skipped']}\n"
+                                            f"Errors: {stats['errors']}\n"
+                                            f"```"
+                                        )
+                                        await progress_message.edit(embed=progress_embed)
+                                        last_update = time_module.time()
+                                        
+                                except Exception as e:
+                                    stats['errors'] += 1
+                                    logger.error(f"Upload failed for {fname}: {str(e)}")
+                                    continue
+
+                        except Exception as e:
+                            logger.error(f"Error processing directory {local_dir}: {str(e)}")
+                            continue
+
+                # Create final summary embed
+                elapsed_time = time_module.time() - start_time
+                summary_embed = discord.Embed(
+                    title="✅ Sync Complete" if stats['errors'] == 0 else "⚠️ Sync Completed with Errors",
+                    description=(
+                        f"Processed {total_files} files in {elapsed_time:.1f}s\n\n"
+                        f"```\n"
+                        f"📤 Uploaded: {stats['uploaded']}\n"
+                        f"⏭️ Skipped: {stats['skipped']}\n"
+                        f"❌ Errors: {stats['errors']}\n"
+                        f"⏱️ Time: {int(elapsed_time/60)}m {int(elapsed_time%60)}s\n"
+                        f"```"
+                    ),
+                    color=discord.Color.green() if stats['errors'] == 0 else discord.Color.yellow(),
+                    timestamp=datetime.now()
+                )
+                
+                await progress_message.edit(embed=summary_embed)
+                logger.info(f"Sync completed in {elapsed_time:.1f}s")
+
+            except Exception as e:
                 logger.error(f"Sync failed: {str(e)}")
+                error_embed = discord.Embed(
+                    title="❌ Sync Failed",
+                    description=f"Error: {str(e)}",
+                    color=discord.Color.red(),
+                    timestamp=datetime.now()
+                )
+                await progress_message.edit(embed=error_embed)
             finally:
                 try:
-                    self.smb_client.close()
+                    smb.close()
                 except:
                     pass
         
-        @self.tree.command(name="clear_cache", description="Clear all locally captured photos")
-        async def clear_cache(interaction: discord.Interaction):
-            """Clear all locally captured photos"""
-            if not interaction.user.guild_permissions.administrator:
-                embed = discord.Embed(
-                    title="❌ Permission Denied",
-                    description="Only administrators can clear the cache",
-                    color=discord.Color.red()
-                )
-                await interaction.response.send_message(embed=embed, ephemeral=True)
-                return
-                
-            await interaction.response.defer()
-            start_time = time.time()
-            
-            try:
-                deleted_count = 0
-                total_size = 0
-                
-                # Find and clear all capture folders
-                capture_folders = glob.glob('captures_*')
-                
-                for folder in capture_folders:
-                    if os.path.isdir(folder):
-                        # Calculate folder size before deletion
-                        folder_size = sum(os.path.getsize(os.path.join(folder, f)) 
-                                        for f in os.listdir(folder) if os.path.isfile(os.path.join(folder, f)))
-                        total_size += folder_size
-                        
-                        # Delete folder and count files
-                        deleted_count += len(os.listdir(folder))
-                        import shutil
-                        shutil.rmtree(folder)
-                        logger.info(f"Deleted folder: {folder}")
-                        
-                embed = discord.Embed(
-                    title="🧹 Cache Cleared",
-                    description="All local capture folders have been removed",
-                    color=discord.Color.green(),
-                    timestamp=datetime.now()
-                )
-                embed.add_field(
-                    name="📊 Statistics",
-                    value=f"Deleted: {deleted_count} files\nSpace freed: {total_size / (1024*1024):.2f} MB",
-                    inline=False
-                )
-                embed.add_field(
-                    name="⏱️ Time Taken",
-                    value=f"{(time.time() - start_time):.2f}s",
-                    inline=True
-                )
-                embed.add_field(
-                    name="👤 Triggered By",
-                    value=interaction.user.mention,
-                    inline=True
-                )
-                embed.set_footer(text="All local captures have been cleared")
-                
-                await interaction.followup.send(embed=embed)
-                logger.info(f"Cache cleared by {interaction.user} - {deleted_count} files deleted")
-                
-            except Exception as e:
-                error_embed = discord.Embed(
-                    title="❌ Cache Clear Failed",
-                    description=str(e),
-                    color=discord.Color.red()
-                )
-                await interaction.followup.send(embed=error_embed)
-                logger.error(f"Cache clear failed: {str(e)}")
-
         @self.tree.command(name="notifications", description="Toggle Discord notifications for motion events")
         async def toggle_notifications(interaction: discord.Interaction):
             self.notifications_enabled = not self.notifications_enabled
@@ -964,9 +1032,153 @@ class TimelapseCamera:
             await interaction.response.send_message(embed=embed)
             logger.info(f"Discord notifications {status} by {interaction.user}")
 
+        @self.tree.command(name="start_clock", description="Start time tracking")
+        async def start_clock(
+            interaction: discord.Interaction,
+            start_time: str = None,
+            auto_checkout_hours: int = 5
+        ):
+            if interaction.user.id != self.owner_id:
+                await interaction.response.send_message("Only the owner can use this command.", ephemeral=True)
+                return
+
+            current_time = datetime.now()
+            if start_time:
+                try:
+                    # Parse provided time
+                    hour, minute = map(int, start_time.split(':'))
+                    start_datetime = current_time.replace(hour=hour, minute=minute)
+                except:
+                    await interaction.response.send_message("Invalid time format. Use HH:MM", ephemeral=True)
+                    return
+            else:
+                start_datetime = current_time
+
+            self.active_clock = {
+                "start_time": start_datetime,
+                "auto_checkout_time": start_datetime + timedelta(hours=auto_checkout_hours)
+            }
+
+            embed = discord.Embed(
+                title="🕐 Clock Started",
+                description="Time tracking has begun",
+                color=discord.Color.green(),
+                timestamp=datetime.now()
+            )
+            embed.add_field(name="Start Time", value=start_datetime.strftime("%I:%M %p"), inline=True)
+            embed.add_field(name="Auto Checkout", value=f"In {auto_checkout_hours} hours", inline=True)
+            
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            
+            # Schedule auto-checkout
+            await asyncio.sleep((self.active_clock["auto_checkout_time"] - datetime.now()).total_seconds())
+            if self.active_clock:  # If still active
+                await self.auto_checkout(interaction.user)
+
+        @self.tree.command(name="stop_clock", description="Stop time tracking")
+        async def stop_clock(
+            interaction: discord.Interaction,
+            end_time: str = None
+        ):
+            if interaction.user.id != self.owner_id:
+                await interaction.response.send_message("Only the owner can use this command.", ephemeral=True)
+                return
+
+            if not self.active_clock:
+                await interaction.response.send_message("No active clock session found.", ephemeral=True)
+                return
+
+            current_time = datetime.now()
+            if end_time:
+                try:
+                    hour, minute = map(int, end_time.split(':'))
+                    end_datetime = current_time.replace(hour=hour, minute=minute)
+                except:
+                    await interaction.response.send_message("Invalid time format. Use HH:MM", ephemeral=True)
+                    return
+            else:
+                end_datetime = current_time
+
+            duration = (end_datetime - self.active_clock["start_time"]).total_seconds() / 3600
+
+            # Add entry to timesheet
+            entry = {
+                "date": current_time.strftime("%Y-%m-%d"),
+                "time_in": self.active_clock["start_time"].strftime("%H:%M"),
+                "time_out": end_datetime.strftime("%H:%M"),
+                "duration": round(duration, 2),
+                "auto_checkout": False
+            }
+
+            self.timesheet_data["entries"].append(entry)
+            self.timesheet_data["total_hours"] = round(
+                sum(entry["duration"] for entry in self.timesheet_data["entries"]), 2
+            )
+            
+            self.save_timesheet()
+            self.active_clock = None
+
+            embed = discord.Embed(
+                title="⏱️ Clock Stopped",
+                description="Time tracking has ended",
+                color=discord.Color.orange(),
+                timestamp=datetime.now()
+            )
+            embed.add_field(name="Duration", value=f"{round(duration, 2)} hours", inline=True)
+            
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+
+        @self.tree.command(name="timesheet_stats", description="View timesheet statistics")
+        async def timesheet_stats(interaction: discord.Interaction):
+            if interaction.user.id != self.owner_id:
+                await interaction.response.send_message("Only the owner can use this command.", ephemeral=True)
+                return
+
+            # Calculate weekly hours
+            current_week = datetime.now().isocalendar()[1]
+            weekly_hours = sum(
+                entry["duration"] for entry in self.timesheet_data["entries"]
+                if datetime.strptime(entry["date"], "%Y-%m-%d").isocalendar()[1] == current_week
+            )
+
+            # Format total time
+            total_hours = self.timesheet_data["total_hours"]
+            days = total_hours // 24
+            weeks = days // 7
+            remaining_days = days % 7
+            remaining_hours = total_hours % 24
+
+            embed = discord.Embed(
+                title="📊 Timesheet Statistics",
+                color=discord.Color.blue(),
+                timestamp=datetime.now()
+            )
+            
+            embed.add_field(
+                name="This Week",
+                value=f"{round(weekly_hours, 2)} hours",
+                inline=False
+            )
+            
+            embed.add_field(
+                name="Total Time",
+                value=f"{int(weeks)} weeks, {int(remaining_days)} days, {round(remaining_hours, 2)} hours",
+                inline=False
+            )
+            
+            if self.active_clock:
+                current_duration = (datetime.now() - self.active_clock["start_time"]).total_seconds() / 3600
+                embed.add_field(
+                    name="Current Session",
+                    value=f"Running for {round(current_duration, 2)} hours",
+                    inline=False
+                )
+
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+
     def format_uptime(self):
         """Format the system uptime"""
-        uptime = time.time() - self.start_time
+        uptime = time_module.time() - self.start_time
         hours, remainder = divmod(int(uptime), 3600)
         minutes, seconds = divmod(remainder, 60)
         return f"{hours}h {minutes}m {seconds}s"
@@ -975,13 +1187,13 @@ class TimelapseCamera:
         """Format the last motion time for status display"""
         if self.last_motion_time == 0:
             return "No motion detected yet"
-        time_diff = time.time() - self.last_motion_time
+        time_diff = time_module.time() - self.last_motion_time
         return f"{int(time_diff)} seconds ago"
 
     async def send_snapshot(self, interaction):
         """Take and send a snapshot directly to Discord"""
         logger.info("Taking snapshot")
-        start_time = time.time()
+        start_time = time_module.time()
         ret, frame = self.camera.read()
         if not ret:
             logger.error("Failed to capture snapshot")
@@ -1001,12 +1213,12 @@ class TimelapseCamera:
             "Current snapshot:",
             file=discord_file
         )
-        elapsed_time = time.time() - start_time
+        elapsed_time = time_module.time() - start_time
         logger.info(f"Snapshot captured and sent in {elapsed_time:.2f}s")
 
     def detect_motion(self, frame):
         """Detect motion in frame with cooldown period and return contours"""
-        current_time = time.time()
+        current_time = time_module.time()
         if current_time - self.last_motion_time < self.motion_cooldown:
             return False, []
 
@@ -1090,8 +1302,8 @@ class TimelapseCamera:
 
     async def capture_and_save(self, frame):
         """Save motion-triggered frame and send to Discord with motion boxes"""
-        start_time = time.time()
-        current_time = time.time()
+        start_time = time_module.time()
+        current_time = time_module.time()
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         folder_name = f"captures_{datetime.now().strftime('%Y%m%d')}"
         os.makedirs(folder_name, exist_ok=True)
@@ -1162,7 +1374,7 @@ class TimelapseCamera:
                 )
                 embed.add_field(
                     name="⏱️ Response Time",
-                    value=f"{(time.time() - self.last_motion_time):.2f}s",
+                    value=f"{(time_module.time() - self.last_motion_time):.2f}s",
                     inline=True
                 )
                 
@@ -1186,7 +1398,7 @@ class TimelapseCamera:
                 # Clean up temporary Discord image
                 os.remove(discord_image_path)
             
-            elapsed_time = time.time() - start_time
+            elapsed_time = time_module.time() - start_time
             logger.info(f"Motion capture processed in {elapsed_time:.2f}s")
             
         except Exception as e:
@@ -1302,11 +1514,52 @@ class TimelapseCamera:
             await self.monitor()
         except Exception as e:
             logger.error(f"Error in camera monitoring: {str(e)}")
+    
+    async def auto_checkout(self, user):
+        """Handle automatic checkout after specified duration"""
+        if self.active_clock:
+            duration = (datetime.now() - self.active_clock["start_time"]).total_seconds() / 3600
+            
+            # Add entry to timesheet
+            entry = {
+                "date": datetime.now().strftime("%Y-%m-%d"),
+                "time_in": self.active_clock["start_time"].strftime("%H:%M"),
+                "time_out": datetime.now().strftime("%H:%M"),
+                "duration": round(duration, 2),
+                "auto_checkout": True
+            }
+            
+            self.timesheet_data["entries"].append(entry)
+            self.timesheet_data["total_hours"] = round(
+                sum(entry["duration"] for entry in self.timesheet_data["entries"]), 2
+            )
+            
+            self.save_timesheet()
+            self.active_clock = None
 
+            # Send DM to owner
+            try:
+                owner = await self.discord_client.fetch_user(self.owner_id)
+                if owner:
+                    embed = discord.Embed(
+                        title="⚠️ Auto Clock-Out",
+                        description="You have been automatically clocked out",
+                        color=discord.Color.yellow(),
+                        timestamp=datetime.now()
+                    )
+                    embed.add_field(
+                        name="Duration",
+                        value=f"{round(duration, 2)} hours",
+                        inline=True
+                    )
+                    await owner.send(embed=embed)
+            except Exception as e:
+                logger.error(f"Failed to send auto-checkout notification: {str(e)}")
+                
     def run(self):
         """Run the system"""
         try:
-            self.start_time = time.time()
+            self.start_time = time_module.time()
             loop = asyncio.get_event_loop()
             
             # Create initialization task
@@ -1325,14 +1578,95 @@ class TimelapseCamera:
             logger.error(f"Error in main loop: {str(e)}")
             self.cleanup()
 
+    async def shutdown_sequence(self):
+        """Execute graceful shutdown sequence"""
+        try:
+            # Create shutdown stats
+            uptime = time_module.time() - self.start_time
+            hours, remainder = divmod(int(uptime), 3600)
+            minutes, seconds = divmod(remainder, 60)
+            
+            # Count total captures
+            total_captures = sum(len(files) for _, _, files in os.walk('captures_'))
+            timelapse_photos = sum(len(files) for _, _, files in os.walk('timelapse_photos_primary'))
+            
+            goodbye_embed = discord.Embed(
+                title="🔌 System Shutting Down",
+                description="The timelapse monitoring system is going offline...",
+                color=discord.Color.red(),
+                timestamp=datetime.now()
+            )
+            
+            # Add stats and status fields
+            goodbye_embed.add_field(
+                name="📊 Session Statistics",
+                value=f"""```
+    Uptime: {hours}h {minutes}m {seconds}s
+    Total Captures: {total_captures:,}
+    Timelapse Photos: {timelapse_photos:,}
+    Last Motion: {self.format_last_motion_time()}```""",
+                inline=False
+            )
+            
+            goodbye_embed.add_field(
+                name="💾 System Status",
+                value=f"""```
+    Camera: {'Connected' if self.camera.isOpened() else 'Disconnected'}
+    Monitoring: {'Active' if self.is_monitoring else 'Paused'}
+    Notifications: {'Enabled' if self.notifications_enabled else 'Disabled'}```""",
+                inline=False
+            )
+            
+            goodbye_embed.add_field(
+                name="👋 Farewell",
+                value="All files have been synced and resources cleaned up. Goodbye!",
+                inline=False
+            )
+            
+            goodbye_embed.set_footer(text=f"Shutdown initiated at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
+            # Send goodbye message if channel exists
+            if self.discord_channel:
+                await self.discord_channel.send(embed=goodbye_embed)
+                logger.info("Goodbye message sent successfully")
+            
+            # Cleanup sequence
+            logger.info("Beginning cleanup sequence...")
+            
+            if self.camera.isOpened():
+                self.camera.release()
+                logger.info("Camera released")
+            
+            cv2.destroyAllWindows()
+            logger.info("OpenCV windows closed")
+            
+            await self.discord_client.close()
+            logger.info("Discord connection closed")
+            
+            logger.info("Cleanup complete, shutting down...")
+            
+            # Exit process
+            os._exit(0)
+            
+        except Exception as e:
+            logger.error(f"Error during shutdown sequence: {str(e)}")
+            os._exit(1)
+
     def cleanup(self):
-        """Cleanup resources"""
+        """Cleanup resources with fallback"""
         logger.info("Starting cleanup")
         try:
+
+            #start shutdown task
+            loop = asyncio.get_event_loop()
+            loop.run_until_complete(self.shutdown_sequence())            
+            # Fallback cleanup if Discord is not ready or shutdown sequence fails
             if hasattr(self, 'camera') and self.camera.isOpened():
                 self.camera.release()
                 logger.info("Camera released")
             cv2.destroyAllWindows()
+            logger.info("OpenCV windows closed")
+                
         except Exception as e:
             logger.error(f"Error during cleanup: {str(e)}")
         finally:
