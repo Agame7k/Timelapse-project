@@ -136,7 +136,7 @@ class TimelapseCamera:
         except Exception as e:
             logger.error(f"Failed to save timesheet: {str(e)}")
 
-    @tasks.loop(time=time(hour=13, minute=25))
+    @tasks.loop(time=time(hour=18, minute=25)) #18:25 UTC = 13:25 CDT
     async def reminder_task(self):
         """Send daily reminder at 1:25 PM on weekdays"""
         if datetime.now().weekday() < 5:  # 0-4 are Monday to Friday
@@ -746,7 +746,7 @@ class TimelapseCamera:
                 else:
                     success_embed.add_field(
                         name="📹 Video",
-                        value=f"Video size exceeds Discord's limit. Access it at: `{video_path}`",
+                        value=f"Video size exceeds Discord's limit. Access it at: `{video_path}` on The SMB server",
                         inline=False
                     )
                     await progress_message.edit(embed=success_embed)
