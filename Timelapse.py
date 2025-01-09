@@ -16,6 +16,16 @@ import sys
 import glob
 import json
 from pathlib import Path
+import RPi.GPIO as GPIO
+from time import sleep
+import threading
+from pydub import AudioSegment
+import numpy as np
+
+
+
+BUZZER_PIN = 18  # GPIO pin for buzzer
+BUZZER_ENABLED = True  # Control flag
 
 
 # Load environment variables
@@ -95,6 +105,19 @@ class TimelapseCamera:
         
         # Set up Discord
         self.setup_discord()
+
+
+    def play_buzzer_tone(self, frequency, duration):
+        """Play a single tone on the buzzer"""
+        if not BUZZER_ENABLED:
+            return
+            
+        GPIO.setmode(GPIO.BCM)
+        GPIO.setup(BUZZER_PIN, GPIO.OUT)
+        buzzer = GPIO.PWM(BUZZER_PIN, frequency)
+        buzzer.start(50)
+        sleep(duration)
+        buzzer.stop()
 
     def load_timesheet(self):
         """Load timesheet data from JSON file and restore active session if exists"""
@@ -1281,6 +1304,54 @@ class TimelapseCamera:
 
             await interaction.response.send_message(embed=embed)
 
+        @self.tree.command(name="imperial_march", description="Play the Imperial March on buzzer")
+        async def play_imperial(interaction: discord.Interaction):
+            if not BUZZER_ENABLED:
+                await interaction.response.send_message("Buzzer is disabled")
+                return
+                
+            await interaction.response.send_message("🎵 Playing Imperial March...")
+            
+            # Extended Imperial March sequence
+            tones = [
+                # First phrase
+                (440, 0.5), (440, 0.5), (440, 0.5),          # A A A
+                (349.2, 0.375), (523.3, 0.25),              # F C
+                (440, 0.5), (349.2, 0.375), (523.3, 0.25),  # A F C
+                (440, 1.0),                                   # A (half)
+
+                # Second phrase (higher octave)
+                (659.3, 0.5), (659.3, 0.5), (659.3, 0.5),    # E' E' E'
+                (698.5, 0.375), (523.3, 0.25),              # F' c
+                (415.3, 0.5), (349.2, 0.375), (523.3, 0.25),# Ab f c
+                (440, 1.0),                                   # A (half)
+
+                # Main theme
+                (880, 0.5), (440, 0.375), (440, 0.25),      # A' A A
+                (880, 0.5), (831.6, 0.375), (784, 0.25),    # A' Ab' G'
+                (740, 0.125), (698.5, 0.125),                # Gb' F'
+                (740, 0.25), (1,0.25), (466.2, 0.25),                # gb' Bb
+                (622.3, 0.5), (587.3, 0.375), (554.4, 0.25),# Eb D Db
+
+                # Final section
+                (523.3, 0.125), (493.9, 0.125),              # c B
+                (523.3, 0.25), (1,0.25), (349.2, 0.25),              # c f
+                (415.3, 0.5), (349.2, 0.25),                # Ab f
+                (415.3, 0.25), (523.3, 0.5),                # Ab C
+                (440, 0.375), (523.3, 0.25),                # a C
+                (659.3, 1.0)                                  # e (half)
+            ]
+            
+            try:
+                for freq, duration in tones:
+                    self.play_buzzer_tone(freq, duration)
+                    sleep(0.05)  # Small pause between notes
+                    
+                GPIO.cleanup(BUZZER_PIN)
+            except Exception as e:
+                logger.error(f"Buzzer playback error: {e}")
+                await interaction.followup.send("❌ Error playing buzzer sequence")
+            
     def format_uptime(self):
         """Format the system uptime"""
         uptime = time_module.time() - self.start_time
