@@ -1339,7 +1339,7 @@ class TimelapseCamera:
                 (415.3, 0.5), (349.2, 0.25),                # Ab f
                 (415.3, 0.25), (523.3, 0.5),                # Ab C
                 (440, 0.375), (523.3, 0.25),                # a C
-                (659.3, 1.0)                                  # e (half)
+                (659.3, 2.0)                                  # e (half)
             ]
             
             try:
@@ -1414,12 +1414,19 @@ class TimelapseCamera:
         
         motion_detected = False
         significant_contours = []
+        
         for contour in contours:
             if cv2.contourArea(contour) > self.min_area:
                 self.last_motion_time = current_time
                 motion_detected = True
                 significant_contours.append(contour)
                 logger.info(f"Motion detected! Area: {cv2.contourArea(contour):.2f}")
+                
+                if not self.notifications_enabled and \
+                (not hasattr(self, '_last_alert_time') or \
+                    current_time - self._last_alert_time > 60):  # 30 minutes = 1800 seconds
+                    self._last_alert_time = current_time
+                    asyncio.create_task(self.play_motion_alert())
 
         self.background = gray
         return motion_detected, significant_contours
@@ -1731,7 +1738,52 @@ class TimelapseCamera:
                     await owner.send(embed=embed)
             except Exception as e:
                 logger.error(f"Failed to send auto-checkout notification: {str(e)}")
+
+    async def play_motion_alert(self):
+        """Play Imperial March snippet when motion detected and notifications disabled"""
+        if not BUZZER_ENABLED:
+            return
+
+        try:
+            # Imperial March first phrase (simplified)
+            notes = [
+                # First phrase
+                (440, 0.5), (440, 0.5), (440, 0.5),          # A A A
+                (349.2, 0.375), (523.3, 0.25),              # F C
+                (440, 0.5), (349.2, 0.375), (523.3, 0.25),  # A F C
+                (440, 1.0),                                   # A (half)
+
+                # Second phrase (higher octave)
+                (659.3, 0.5), (659.3, 0.5), (659.3, 0.5),    # E' E' E'
+                (698.5, 0.375), (523.3, 0.25),              # F' c
+                (415.3, 0.5), (349.2, 0.375), (523.3, 0.25),# Ab f c
+                (440, 1.0),                                   # A (half)
+
+                # Main theme
+                (880, 0.5), (440, 0.375), (440, 0.25),      # A' A A
+                (880, 0.5), (831.6, 0.375), (784, 0.25),    # A' Ab' G'
+                (740, 0.125), (698.5, 0.125),                # Gb' F'
+                (740, 0.25), (1,0.25), (466.2, 0.25),                # gb' Bb
+                (622.3, 0.5), (587.3, 0.375), (554.4, 0.25),# Eb D Db
+
+                # Final section
+                (523.3, 0.125), (493.9, 0.125),              # c B
+                (523.3, 0.25), (1,0.25), (349.2, 0.25),              # c f
+                (415.3, 0.5), (349.2, 0.25),                # Ab f
+                (415.3, 0.25), (523.3, 0.5),                # Ab C
+                (440, 0.375), (523.3, 0.25),                # a C
+                (659.3, 2.0)                                  # e (half)
+            ]
+            
+            for freq, duration in notes:
+                self.play_buzzer_tone(freq, duration)
+                await asyncio.sleep(0.05)  # Small pause between notes
                 
+        except Exception as e:
+            logger.error(f"Error playing motion alert: {e}")
+        finally:
+            GPIO.cleanup(BUZZER_PIN)
+                    
     def run(self):
         """Run the system"""
         try:
@@ -1743,7 +1795,7 @@ class TimelapseCamera:
             
             # Create other tasks
             loop.create_task(self.run_camera())
-            loop.create_task(self.scheduled_capture())
+            # loop.create_task(self.scheduled_capture())   #add this line to enable scheduled capture
             
             # Start Discord client
             loop.run_until_complete(self.discord_client.start(os.getenv('DISCORD_TOKEN')))
