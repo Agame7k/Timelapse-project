@@ -1421,12 +1421,13 @@ class TimelapseCamera:
                 motion_detected = True
                 significant_contours.append(contour)
                 logger.info(f"Motion detected! Area: {cv2.contourArea(contour):.2f}")
+                asyncio.create_task(self.play_motion_alert())
+
                 
                 if not self.notifications_enabled and \
                 (not hasattr(self, '_last_alert_time') or \
                     current_time - self._last_alert_time > 60):  # 30 minutes = 1800 seconds
                     self._last_alert_time = current_time
-                    asyncio.create_task(self.play_motion_alert())
 
         self.background = gray
         return motion_detected, significant_contours
