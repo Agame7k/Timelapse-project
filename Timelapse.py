@@ -2067,7 +2067,7 @@ class TimelapseCamera:
         
         # Check if enough time has passed since last alert
         if hasattr(self, '_last_imperial_march_time') and \
-        current_time - self._last_imperial_march_time < 600:  # 600 seconds = 10 minutes
+        current_time - self._last_imperial_march_time < 3600:  # 3600 seconds = 1 hour
             logger.info("Skipping Imperial March alert - cooldown period")
             return
 
