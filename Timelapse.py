@@ -1445,26 +1445,12 @@ class TimelapseCamera:
                 )
                 await interaction.followup.send(embed=error_embed)
 
-        @self.tree.command(name="reset_heatmap", description="Reset motion heatmap data")
-        async def reset_heatmap(interaction: discord.Interaction):
-            """Reset the motion heatmap"""
-            self.heatmap = np.zeros_like(self.heatmap)
-            self.heatmap_start_time = datetime.now()
-            
-            embed = discord.Embed(
-                title="🔄 Heatmap Reset",
-                description="Motion heatmap data has been cleared",
-                color=discord.Color.blue(),
-                timestamp=datetime.now()
-            )
-            await interaction.response.send_message(embed=embed)
-            logger.info("Heatmap reset by user")
-        
         @self.tree.command(name="train_heatmap", description="Analyze motion patterns and optimize detection")
         async def train_system(
             interaction: discord.Interaction,
             days: int = 7,
-            threshold_adjust: bool = True
+            threshold_adjust: bool = True,
+            intensity_scale: float = 0.1  # Add intensity scaling parameter
         ):
             """Analyze captured images to optimize detection settings"""
             await interaction.response.defer()
@@ -1506,8 +1492,8 @@ class TimelapseCamera:
                     await progress_msg.edit(embed=embed)
                     return
                 
-                # Analyze motion patterns
-                total_motion_mask = np.zeros((480, 640))
+                # Initialize motion analysis arrays
+                total_motion_mask = np.zeros((480, 640), dtype=np.float32)  # Use float32 for better precision
                 time_distribution = []
                 areas = []
                 
@@ -1533,8 +1519,8 @@ class TimelapseCamera:
                         area = cv2.contourArea(contour)
                         if area > self.min_area:
                             areas.append(area)
-                            mask = np.zeros_like(gray)
-                            cv2.drawContours(mask, [contour], -1, 1, -1)
+                            mask = np.zeros_like(gray, dtype=np.float32)
+                            cv2.drawContours(mask, [contour], -1, intensity_scale, -1)  # Use intensity_scale for accumulation
                             total_motion_mask += mask
                             
                             # Store motion data for clustering
@@ -1542,6 +1528,10 @@ class TimelapseCamera:
                             center_x = x + w//2
                             center_y = y + h//2
                             motion_data.append([center_x, center_y, timestamp.hour])
+                
+                # Normalize motion mask
+                if np.max(total_motion_mask) > 0:
+                    total_motion_mask = (total_motion_mask / np.max(total_motion_mask)) * 255
                 
                 # Cluster analysis
                 if motion_data:
@@ -1557,9 +1547,16 @@ class TimelapseCamera:
                     # Generate visualization
                     plt.figure(figsize=(15, 10))
                     
-                    # Motion heatmap
+                    # Motion heatmap with improved visualization
                     plt.subplot(2, 2, 1)
-                    sns.heatmap(total_motion_mask, cmap='hot')
+                    sns.heatmap(
+                        total_motion_mask, 
+                        cmap='hot',
+                        vmin=0,
+                        vmax=255,
+                        robust=True,  # Handle outliers
+                        cbar_kws={'label': 'Motion Intensity (normalized)'}
+                    )
                     plt.title('Motion Heatmap')
                     
                     # Time distribution
@@ -1627,6 +1624,7 @@ class TimelapseCamera:
                         value=f"""```
         Score: {reliability*100:.1f}%
         False Positives: {false_positives}
+        Motion Intensity Scale: {intensity_scale}
         ```""",
                         inline=False
                     )
@@ -1651,7 +1649,8 @@ class TimelapseCamera:
                         'reliability': reliability,
                         'suggested_min_area': suggested_min_area if threshold_adjust else None,
                         'peak_hour': peak_hour,
-                        'clusters': n_clusters
+                        'clusters': n_clusters,
+                        'intensity_scale': intensity_scale
                     }
                     
                 else:
