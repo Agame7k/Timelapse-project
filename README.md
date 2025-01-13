@@ -13,7 +13,8 @@ A Python-based camera monitoring system with Discord integration, motion detecti
 - ⏱️ Scheduled capture every 30 minutes
 - 🔔 Configurable Discord notifications
 - 📊 System monitoring and statistics
-- 📝 Timesheet tracking and statistics (with reminder at your choice (mine is 1:25 PM)
+- 📝 Timesheet tracking and statistics (with reminder at your choice (mine is 1:30 PM))
+- 🌡️ Heatmap generation and training
 
 ## Requirements
 
@@ -62,6 +63,9 @@ OWNER_ID=your_discord_id
 - `/start_clock` - starts time tracking
 - `/stop_clock` - stops time tracking
 - `/timesheet_stats` - view timesheet statistics
+- `/train_heatmap` - train the heatmap model
+- `/generate_heatmap` - generate the heatmap
+
 
 ## Usage
 

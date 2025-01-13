@@ -17,10 +17,16 @@ import glob
 import json
 from pathlib import Path
 import RPi.GPIO as GPIO
+import matplotlib.pyplot as plt
+from datetime import datetime, timedelta
 from time import sleep
 import threading
 from pydub import AudioSegment
 import numpy as np
+import seaborn as sns
+from sklearn.cluster import DBSCAN
+from collections import Counter
+
 
 
 
@@ -57,6 +63,9 @@ class TimelapseCamera:
         self.active_clock = None
         self.owner_id = int(os.getenv('OWNER_ID'))  # Add OWNER_ID to your cred.env
         self.timesheet_file = "timesheet.json"
+        self.heatmap = np.zeros((480, 640))  # Adjust size to match your camera resolution
+        self.heatmap_start_time = datetime.now()
+        self.heatmap_cooldown = 0.5  # Seconds between heatmap updates
         self.load_timesheet()
         
         # Discord initialization
@@ -108,16 +117,31 @@ class TimelapseCamera:
 
 
     def play_buzzer_tone(self, frequency, duration):
-        """Play a single tone on the buzzer"""
+        """Play a single tone on the buzzer with proper cleanup"""
         if not BUZZER_ENABLED:
             return
             
-        GPIO.setmode(GPIO.BCM)
-        GPIO.setup(BUZZER_PIN, GPIO.OUT)
-        buzzer = GPIO.PWM(BUZZER_PIN, frequency)
-        buzzer.start(50)
-        sleep(duration)
-        buzzer.stop()
+        try:
+            GPIO.setmode(GPIO.BCM)
+            GPIO.setup(BUZZER_PIN, GPIO.OUT)
+            buzzer = GPIO.PWM(BUZZER_PIN, frequency)
+            buzzer.start(50)
+            sleep(duration)
+            buzzer.stop()
+            GPIO.cleanup(BUZZER_PIN)  # Cleanup after each tone
+        except Exception as e:
+            logger.error(f"Error playing tone: {e}")
+
+    async def update_heatmap(self, contours):
+        """Update motion heatmap with new contours"""
+        try:
+            mask = np.zeros_like(self.heatmap)
+            for contour in contours:
+                cv2.drawContours(mask, [contour], -1, (1), -1)
+            self.heatmap += mask
+            logger.debug("Heatmap updated with new motion data")
+        except Exception as e:
+            logger.error(f"Error updating heatmap: {e}")
 
     def load_timesheet(self):
         """Load timesheet data from JSON file and restore active session if exists"""
@@ -159,7 +183,7 @@ class TimelapseCamera:
         except Exception as e:
             logger.error(f"Failed to save timesheet: {str(e)}")
 
-    @tasks.loop(time=time(hour=19, minute=25)) #19:25 UTC = 13:25 CDT
+    @tasks.loop(time=time(hour=19, minute=30)) #19:25 UTC = 13:30 CDT
     async def reminder_task(self):
         """Send daily reminder at 1:25 PM on weekdays"""
         if datetime.now().weekday() < 5:  # 0-4 are Monday to Friday
@@ -194,8 +218,7 @@ class TimelapseCamera:
         except Exception as e:
             logger.error(f"Initialization failed: {e}")
             return False
-    
-    
+       
     def setup_discord(self):
         """Initialize Discord bot and commands"""
         @self.discord_client.event
@@ -691,6 +714,7 @@ class TimelapseCamera:
                     await progress_message.edit(embed=embed)
                     return
                 
+                start_time = time_module.time()
                 # Count total images across all folders
                 total_images = 0
                 all_images = []
@@ -723,14 +747,30 @@ class TimelapseCamera:
                     video.write(cv2.imread(image_path))
                     
                     if i % 10 == 0 or i == total_images - 1:  # Update every 10 frames or on last frame
-                        progress = (i + 1) / total_images
+                        # Calculate timing metrics
+                        elapsed_time = time_module.time() - start_time
+                        frames_processed = i + 1
+                        processing_rate = frames_processed / elapsed_time if elapsed_time > 0 else 0
+                        frames_remaining = total_images - frames_processed
+                        eta = frames_remaining / processing_rate if processing_rate > 0 else 0
+                        
+                        # Calculate progress percentage
+                        progress = frames_processed / total_images
+                        
+                        # Create progress bar
                         bar_length = 20
                         filled_length = int(bar_length * progress)
                         bar = '█' * filled_length + '░' * (bar_length - filled_length)
                         
+                        # Format time strings
+                        elapsed_str = f"{int(elapsed_time//60)}:{int(elapsed_time%60):02d}"
+                        eta_str = f"{int(eta//60)}:{int(eta%60):02d}"
+                        
+                        # Update embed description
                         embed.description = (
-                            f"Processing images... ({i+1}/{total_images})\n"
-                            f"`{bar}` {progress*100:.1f}%"
+                            f"Processing images... ({frames_processed}/{total_images})\n"
+                            f"`{bar}` {progress*100:.1f}%\n"
+                            f"Elapsed: {elapsed_str} | ETA: {eta_str}"
                         )
                         await progress_message.edit(embed=embed)
                 
@@ -811,28 +851,15 @@ class TimelapseCamera:
                 value=self.format_uptime(),
                 inline=True
             )
-            embed.set_footer(text="System will reboot in 5 seconds")
+            embed.set_footer(text="System will reboot momentarily")
             
             await interaction.response.send_message(embed=embed)
             logger.info(f"System reboot initiated by {interaction.user}")
             
-            # Create reboot script
-            reboot_script = """#!/bin/bash
-        sleep 5
-        sudo reboot
-        rm -- "$0"
-        """
-            with open("reboot_pi.sh", "w") as f:
-                f.write(reboot_script)
-            
-            # Make script executable and run
-            os.chmod("reboot_pi.sh", 0o755)
-            
             # Cleanup and execute reboot
-            self.cleanup()
             await self.discord_client.close()
-            os.system("./reboot_pi.sh &")
-            sys.exit(0)
+            self.cleanup()
+            os.system("sudo reboot")
 
         @self.tree.command(name="sync", description="Sync files between Pi and SMB server")
         async def sync_files(interaction: discord.Interaction):
@@ -1351,7 +1378,295 @@ class TimelapseCamera:
             except Exception as e:
                 logger.error(f"Buzzer playback error: {e}")
                 await interaction.followup.send("❌ Error playing buzzer sequence")
+
+        @self.tree.command(name="generate_heatmap", description="Generate motion heatmap")
+        async def generate_heatmap(
+            interaction: discord.Interaction,
+            hours: int = 24,
+            alpha: float = 0.6
+        ):
+            """Generate and send motion heatmap"""
+            await interaction.response.defer()
+
+            try:
+                # Create visualization
+                plt.figure(figsize=(12, 8))
+                plt.imshow(self.heatmap, cmap='hot', interpolation='gaussian')
+                plt.colorbar(label='Motion Intensity')
+                
+                # Add timestamp and stats
+                total_motion = np.sum(self.heatmap > 0)
+                coverage = (total_motion / self.heatmap.size) * 100
+                
+                plt.title(f"Motion Heatmap (Last {hours} Hours)\n"
+                        f"Coverage: {coverage:.1f}% of frame")
+                
+                # Save plot
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                heatmap_path = f"heatmap_{timestamp}.png"
+                plt.savefig(heatmap_path)
+                plt.close()
+
+                # Create embed
+                embed = discord.Embed(
+                    title="🔥 Motion Heatmap Analysis",
+                    description="Visualization of motion patterns",
+                    color=discord.Color.orange(),
+                    timestamp=datetime.now()
+                )
+                
+                embed.add_field(
+                    name="📊 Statistics",
+                    value=f"""```
+    Time Range: {hours} hours
+    Motion Coverage: {coverage:.1f}%
+    Peak Activity: {np.max(self.heatmap):.0f} events
+    Total Events: {np.sum(self.heatmap):.0f}
+    ```""",
+                    inline=False
+                )
+
+                # Send to Discord
+                file = discord.File(heatmap_path, filename="heatmap.png")
+                embed.set_image(url="attachment://heatmap.png")
+                
+                await interaction.followup.send(embed=embed, file=file)
+                
+                # Cleanup
+                os.remove(heatmap_path)
+                logger.info("Heatmap generated and sent successfully")
+
+            except Exception as e:
+                logger.error(f"Error generating heatmap: {e}")
+                error_embed = discord.Embed(
+                    title="❌ Heatmap Generation Failed",
+                    description=f"Error: {str(e)}",
+                    color=discord.Color.red()
+                )
+                await interaction.followup.send(embed=error_embed)
+
+        @self.tree.command(name="reset_heatmap", description="Reset motion heatmap data")
+        async def reset_heatmap(interaction: discord.Interaction):
+            """Reset the motion heatmap"""
+            self.heatmap = np.zeros_like(self.heatmap)
+            self.heatmap_start_time = datetime.now()
             
+            embed = discord.Embed(
+                title="🔄 Heatmap Reset",
+                description="Motion heatmap data has been cleared",
+                color=discord.Color.blue(),
+                timestamp=datetime.now()
+            )
+            await interaction.response.send_message(embed=embed)
+            logger.info("Heatmap reset by user")
+        
+        @self.tree.command(name="train_heatmap", description="Analyze motion patterns and optimize detection")
+        async def train_system(
+            interaction: discord.Interaction,
+            days: int = 7,
+            threshold_adjust: bool = True
+        ):
+            """Analyze captured images to optimize detection settings"""
+            await interaction.response.defer()
+            
+            start_time = time_module.time()
+            
+            # Initial embed
+            embed = discord.Embed(
+                title="🧠 Training System",
+                description="Analyzing motion patterns...",
+                color=discord.Color.blue(),
+                timestamp=datetime.now()
+            )
+            progress_msg = await interaction.followup.send(embed=embed)
+            
+            try:
+                # Get date range
+                end_date = datetime.now()
+                start_date = end_date - timedelta(days=days)
+                
+                # Collect image paths
+                image_paths = []
+                motion_data = []
+                
+                for date in (start_date + timedelta(n) for n in range(days)):
+                    folder = f"captures_{date.strftime('%Y%m%d')}"
+                    if os.path.exists(folder):
+                        paths = sorted(glob.glob(f"{folder}/*.jpg"))
+                        image_paths.extend(paths)
+                        
+                        # Update progress
+                        embed.description = f"Found {len(image_paths)} images to analyze..."
+                        await progress_msg.edit(embed=embed)
+                
+                if not image_paths:
+                    embed.title = "❌ Analysis Failed"
+                    embed.description = "No images found in the specified date range"
+                    embed.color = discord.Color.red()
+                    await progress_msg.edit(embed=embed)
+                    return
+                
+                # Analyze motion patterns
+                total_motion_mask = np.zeros((480, 640))
+                time_distribution = []
+                areas = []
+                
+                for i, path in enumerate(image_paths):
+                    if i % 10 == 0:  # Update progress every 10 images
+                        embed.description = f"Processing image {i+1}/{len(image_paths)}..."
+                        await progress_msg.edit(embed=embed)
+                        
+                    # Extract timestamp from filename
+                    timestamp = datetime.strptime(os.path.basename(path)[:15], "%Y%m%d_%H%M%S")
+                    time_distribution.append(timestamp.hour)
+                    
+                    # Process image
+                    frame = cv2.imread(path)
+                    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                    gray = cv2.GaussianBlur(gray, (21, 21), 0)
+                    
+                    # Detect motion areas
+                    thresh = cv2.threshold(gray, self.motion_threshold, 255, cv2.THRESH_BINARY)[1]
+                    contours, _ = cv2.findContours(thresh.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                    
+                    for contour in contours:
+                        area = cv2.contourArea(contour)
+                        if area > self.min_area:
+                            areas.append(area)
+                            mask = np.zeros_like(gray)
+                            cv2.drawContours(mask, [contour], -1, 1, -1)
+                            total_motion_mask += mask
+                            
+                            # Store motion data for clustering
+                            x, y, w, h = cv2.boundingRect(contour)
+                            center_x = x + w//2
+                            center_y = y + h//2
+                            motion_data.append([center_x, center_y, timestamp.hour])
+                
+                # Cluster analysis
+                if motion_data:
+                    X = np.array(motion_data)
+                    db = DBSCAN(eps=30, min_samples=5).fit(X[:, :2])  # Cluster spatial data
+                    n_clusters = len(set(db.labels_)) - (1 if -1 in db.labels_ else 0)
+                    
+                    # Calculate optimal threshold
+                    if threshold_adjust and areas:
+                        suggested_threshold = np.percentile(areas, 25)  # Use 25th percentile
+                        suggested_min_area = max(100, int(suggested_threshold))
+                    
+                    # Generate visualization
+                    plt.figure(figsize=(15, 10))
+                    
+                    # Motion heatmap
+                    plt.subplot(2, 2, 1)
+                    sns.heatmap(total_motion_mask, cmap='hot')
+                    plt.title('Motion Heatmap')
+                    
+                    # Time distribution
+                    plt.subplot(2, 2, 2)
+                    sns.histplot(time_distribution, bins=24)
+                    plt.title('Activity by Hour')
+                    plt.xlabel('Hour of Day')
+                    
+                    # Motion area distribution
+                    plt.subplot(2, 2, 3)
+                    sns.histplot(areas, bins=50)
+                    plt.title('Motion Area Distribution')
+                    plt.xlabel('Area (pixels)')
+                    
+                    # Cluster visualization
+                    plt.subplot(2, 2, 4)
+                    scatter = plt.scatter(X[:, 0], X[:, 1], c=db.labels_, cmap='viridis')
+                    plt.title(f'Motion Clusters (n={n_clusters})')
+                    plt.colorbar(scatter)
+                    
+                    # Save and send plot
+                    analysis_path = "motion_analysis.png"
+                    plt.tight_layout()
+                    plt.savefig(analysis_path)
+                    plt.close()
+                    
+                    # Create results embed
+                    results_embed = discord.Embed(
+                        title="📊 Motion Analysis Results",
+                        description="System analysis complete",
+                        color=discord.Color.green(),
+                        timestamp=datetime.now()
+                    )
+                    
+                    # Add statistics
+                    peak_hour = max(Counter(time_distribution).items(), key=lambda x: x[1])[0]
+                    avg_area = np.mean(areas)
+                    
+                    results_embed.add_field(
+                        name="📈 Activity Patterns",
+                        value=f"""```
+        Images Analyzed: {len(image_paths)}
+        Peak Activity: {peak_hour:02d}:00
+        Motion Clusters: {n_clusters}
+        Avg Motion Area: {avg_area:.0f}px²
+        ```""",
+                        inline=False
+                    )
+                    
+                    if threshold_adjust:
+                        results_embed.add_field(
+                            name="⚙️ Recommended Settings",
+                            value=f"""```
+        Min Area: {suggested_min_area} (current: {self.min_area})
+        ```""",
+                            inline=False
+                        )
+                    
+                    # Calculate reliability score
+                    false_positives = sum(1 for area in areas if area < self.min_area)
+                    reliability = 1 - (false_positives / len(areas) if areas else 0)
+                    
+                    results_embed.add_field(
+                        name="🎯 System Reliability",
+                        value=f"""```
+        Score: {reliability*100:.1f}%
+        False Positives: {false_positives}
+        ```""",
+                        inline=False
+                    )
+                    
+                    # Add processing time
+                    elapsed = time_module.time() - start_time
+                    results_embed.set_footer(text=f"Analysis completed in {elapsed:.1f}s")
+                    
+                    # Send results
+                    file = discord.File(analysis_path, filename="analysis.png")
+                    results_embed.set_image(url="attachment://analysis.png")
+                    
+                    await progress_msg.edit(embed=results_embed)
+                    await interaction.followup.send(file=file)
+                    
+                    # Cleanup
+                    os.remove(analysis_path)
+                    
+                    # Store analysis results
+                    self.last_analysis = {
+                        'timestamp': datetime.now(),
+                        'reliability': reliability,
+                        'suggested_min_area': suggested_min_area if threshold_adjust else None,
+                        'peak_hour': peak_hour,
+                        'clusters': n_clusters
+                    }
+                    
+                else:
+                    embed.title = "❌ Analysis Failed"
+                    embed.description = "No motion data found in images"
+                    embed.color = discord.Color.red()
+                    await progress_msg.edit(embed=embed)
+                    
+            except Exception as e:
+                logger.error(f"Training analysis failed: {e}")
+                embed.title = "❌ Analysis Failed"
+                embed.description = f"Error: {str(e)}"
+                embed.color = discord.Color.red()
+                await progress_msg.edit(embed=embed)
+                
     def format_uptime(self):
         """Format the system uptime"""
         uptime = time_module.time() - self.start_time
@@ -1422,12 +1737,16 @@ class TimelapseCamera:
                 significant_contours.append(contour)
                 logger.info(f"Motion detected! Area: {cv2.contourArea(contour):.2f}")
                 asyncio.create_task(self.play_motion_alert())
-
-                
+                current_time = time_module.time()
+                if not hasattr(self, '_last_heatmap_update') or \
+                current_time - self._last_heatmap_update > self.heatmap_cooldown:
+                    asyncio.create_task(self.update_heatmap(significant_contours))
+                    self._last_heatmap_update = current_time
                 if not self.notifications_enabled and \
                 (not hasattr(self, '_last_alert_time') or \
                     current_time - self._last_alert_time > 60):  # 30 minutes = 1800 seconds
                     self._last_alert_time = current_time
+        
 
         self.background = gray
         return motion_detected, significant_contours
@@ -1741,11 +2060,22 @@ class TimelapseCamera:
                 logger.error(f"Failed to send auto-checkout notification: {str(e)}")
 
     async def play_motion_alert(self):
-        """Play Imperial March snippet when motion detected and notifications disabled"""
+        """Play Imperial March with 10-minute cooldown"""
         if not BUZZER_ENABLED:
             return
 
+        current_time = time_module.time()
+        
+        # Check if enough time has passed since last alert
+        if hasattr(self, '_last_imperial_march_time') and \
+        current_time - self._last_imperial_march_time < 600:  # 600 seconds = 10 minutes
+            logger.info("Skipping Imperial March alert - cooldown period")
+            return
+
         try:
+            # Update last play time
+            self._last_imperial_march_time = current_time
+            
             # Imperial March first phrase (simplified)
             notes = [
                 # First phrase
@@ -1778,7 +2108,7 @@ class TimelapseCamera:
             
             for freq, duration in notes:
                 self.play_buzzer_tone(freq, duration)
-                await asyncio.sleep(0.05)  # Small pause between notes
+                await asyncio.sleep(0.02)  # Small gap between notes
                 
         except Exception as e:
             logger.error(f"Error playing motion alert: {e}")

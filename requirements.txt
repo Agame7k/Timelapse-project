@@ -17,3 +17,12 @@ asyncio>=3.4.3
 
 # Logging & DateTime
 python-dateutil>=2.8.2
+
+#mathplotlib
+matplotlib>=3.4.3
+
+#seaborn
+seaborn>=0.11.2
+
+#skitlearn
+scikit-learn>=1.0.1
