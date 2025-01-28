@@ -73,7 +73,7 @@ SMTP_PORT=587
 - `/timesheet_stats` - view timesheet statistics
 - `/train_heatmap` - train the heatmap model
 - `/generate_heatmap` - generate the heatmap
-- '/send_email' - send email with timesheet statistics
+- `/send_email` - send email with timesheet statistics
 
 
 ## Usage
