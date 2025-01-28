@@ -1665,7 +1665,125 @@ class TimelapseCamera:
                 embed.description = f"Error: {str(e)}"
                 embed.color = discord.Color.red()
                 await progress_msg.edit(embed=embed)
+        
+        @self.tree.command(name="send_mail", description="Send timesheet report via email")
+        async def send_mail(interaction: discord.Interaction):
+            """Send timesheet statistics via email"""
+            if interaction.user.id != self.owner_id:
+                await interaction.response.send_message("Only the owner can use this command.", ephemeral=True)
+                return
                 
+            await interaction.response.defer()
+            
+            try:
+                import smtplib
+                from email.mime.text import MIMEText
+                from email.mime.multipart import MIMEMultipart
+                
+                # Get email settings from env
+                sender_email = os.getenv('EMAIL_ADDRESS')
+                receiver_email = os.getenv('Email_RECEIVER')  # Sending to whoever you want
+                password = os.getenv('EMAIL_PASSWORD')
+                smtp_server = os.getenv('SMTP_SERVER')
+                smtp_port = int(os.getenv('SMTP_PORT', 587))
+                
+                if not all([sender_email, password, smtp_server]):
+                    raise ValueError("Missing email configuration in cred.env")
+                    
+                # Calculate statistics
+                total_hours = self.timesheet_data["total_hours"]
+                raw_hours = sum(entry["duration"] for entry in self.timesheet_data["entries"])
+                
+                # Calculate weekly hours
+                current_week = datetime.now().isocalendar()[1]
+                weekly_hours = sum(
+                    entry["duration"] for entry in self.timesheet_data["entries"]
+                    if datetime.strptime(entry["date"], "%Y-%m-%d").isocalendar()[1] == current_week
+                )
+                
+                # Format readable duration
+                def format_hours(hours):
+                    weeks = int(hours // (24 * 7))
+                    remaining = hours % (24 * 7)
+                    days = int(remaining // 24)
+                    remaining_hours = remaining % 24
+                    
+                    parts = []
+                    if weeks: parts.append(f"{weeks} weeks")
+                    if days: parts.append(f"{days} days")
+                    if remaining_hours: parts.append(f"{remaining_hours:.1f} hours")
+                    return ", ".join(parts)
+                
+                # Create message
+                msg = MIMEMultipart()
+                msg['From'] = sender_email
+                msg['To'] = receiver_email
+                msg['Subject'] = f"Timesheet Report - {datetime.now().strftime('%Y-%m-%d')}"
+                
+                body = f"""
+                <h2>🕒 Timesheet Statistics</h2>
+                
+                <h3>Current Week</h3>
+                Raw Hours: {weekly_hours:.2f} hours
+                Formatted: {format_hours(weekly_hours)}
+                
+                <h3>All Time</h3>
+                Raw Hours: {raw_hours:.2f} hours
+                Cleaned Total: {total_hours:.2f} hours
+                Formatted: {format_hours(total_hours)}
+                
+                <h3>Active Session</h3>
+                {
+                    f"Running since: {self.active_clock['start_time'].strftime('%I:%M %p')}" 
+                    if self.active_clock else "No active session"
+                }
+                
+                <br><br>
+                <small>Generated on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</small>
+                """
+                
+                msg.attach(MIMEText(body, 'html'))
+                
+                # Send email
+                with smtplib.SMTP(smtp_server, smtp_port) as server:
+                    server.starttls()
+                    server.login(sender_email, password)
+                    server.send_message(msg)
+                    
+                # Success message
+                embed = discord.Embed(
+                    title="📧 Email Sent",
+                    description="Timesheet report has been emailed successfully",
+                    color=discord.Color.green(),
+                    timestamp=datetime.now()
+                )
+                embed.add_field(
+                    name="Statistics Sent",
+                    value=f"""```
+        Weekly Hours: {weekly_hours:.2f}
+        Total Hours: {total_hours:.2f}
+        Raw Hours: {raw_hours:.2f}
+        ```""",
+                    inline=False
+                )
+                embed.add_field(
+                    name="Recipient",
+                    value=f"`{receiver_email}`",
+                    inline=False
+                )
+                
+                await interaction.followup.send(embed=embed)
+                logger.info(f"Timesheet report sent to {receiver_email}")
+                
+            except Exception as e:
+                error_embed = discord.Embed(
+                    title="❌ Email Failed",
+                    description=f"Failed to send email: {str(e)}",
+                    color=discord.Color.red()
+                )
+                await interaction.followup.send(embed=error_embed)
+                logger.error(f"Failed to send email: {str(e)}")
+
     def format_uptime(self):
         """Format the system uptime"""
         uptime = time_module.time() - self.start_time
