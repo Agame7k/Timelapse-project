@@ -15,6 +15,8 @@ A Python-based camera monitoring system with Discord integration, motion detecti
 - 📊 System monitoring and statistics
 - 📝 Timesheet tracking and statistics (with reminder at your choice (mine is 1:30 PM))
 - 🌡️ Heatmap generation and training
+- 📧 Email reporting for timesheet statistics
+
 
 ## Requirements
 
@@ -23,6 +25,7 @@ A Python-based camera monitoring system with Discord integration, motion detecti
 - Discord.py
 - SMB support
 - Raspberry Pi (recommended) or system with camera
+- SMTP email access (for reporting features)
 
 ## Installation
 
@@ -48,6 +51,11 @@ SMB_SHARE_NAME=your_share_name
 CLIENT_NAME=your_client_name
 SERVER_NAME=your_server_name
 OWNER_ID=your_discord_id
+EMAIL_ADDRESS=your_email@domain.com
+EMAIL_RECEIVER=recipient@domain.com
+EMAIL_PASSWORD=your_app_password
+SMTP_SERVER=smtp.gmail.com
+SMTP_PORT=587
 ```
 
 ## Discord Commands
@@ -65,6 +73,7 @@ OWNER_ID=your_discord_id
 - `/timesheet_stats` - view timesheet statistics
 - `/train_heatmap` - train the heatmap model
 - `/generate_heatmap` - generate the heatmap
+- '/send_email' - send email with timesheet statistics
 
 
 ## Usage
