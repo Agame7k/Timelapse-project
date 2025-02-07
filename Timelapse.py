@@ -183,7 +183,7 @@ class TimelapseCamera:
         except Exception as e:
             logger.error(f"Failed to save timesheet: {str(e)}")
 
-    @tasks.loop(time=time(hour=19, minute=30)) #19:25 UTC = 13:30 CDT
+    @tasks.loop(time=time(hour=20, minute=28)) #20:28 UTC = 2:28 PM CST
     async def reminder_task(self):
         """Send daily reminder at 1:25 PM on weekdays"""
         if datetime.now().weekday() < 5:  # 0-4 are Monday to Friday
@@ -1783,6 +1783,171 @@ class TimelapseCamera:
                 )
                 await interaction.followup.send(embed=error_embed)
                 logger.error(f"Failed to send email: {str(e)}")
+        @self.tree.command(name="list_entries", description="List recent timesheet entries")
+        async def list_entries(interaction: discord.Interaction, count: int = 5):
+            """List the most recent timesheet entries"""
+            if interaction.user.id != self.owner_id:
+                await interaction.response.send_message("Only the owner can use this command.", ephemeral=True)
+                return
+
+            entries = self.timesheet_data["entries"][-count:]
+            
+            embed = discord.Embed(
+                title="📋 Recent Timesheet Entries",
+                color=discord.Color.blue(),
+                timestamp=datetime.now()
+            )
+            
+            for i, entry in enumerate(entries):
+                embed.add_field(
+                    name=f"Entry #{len(self.timesheet_data['entries']) - count + i + 1}",
+                    value=f"""```
+        Date: {entry['date']}
+        Time: {entry['time_in']} - {entry['time_out']}
+        Duration: {entry['duration']}h
+        Auto: {'Yes' if entry.get('auto_checkout', False) else 'No'}```""",
+                    inline=False
+                )
+            
+            await interaction.response.send_message(embed=embed)
+
+        @self.tree.command(name="remove_entry", description="Remove a timesheet entry")
+        async def remove_entry(interaction: discord.Interaction, entry_number: int):
+            """Remove a specific entry from the timesheet"""
+            if interaction.user.id != self.owner_id:
+                await interaction.response.send_message("Only the owner can use this command.", ephemeral=True)
+                return
+
+            try:
+                if entry_number < 1 or entry_number > len(self.timesheet_data["entries"]):
+                    await interaction.response.send_message("Invalid entry number.", ephemeral=True)
+                    return
+
+                # Get the entry to remove
+                entry = self.timesheet_data["entries"][entry_number - 1]
+                
+                # Remove the entry
+                self.timesheet_data["entries"].pop(entry_number - 1)
+                
+                # Recalculate total hours
+                self.timesheet_data["total_hours"] = round(
+                    sum(entry["duration"] for entry in self.timesheet_data["entries"]), 2
+                )
+                
+                # Save changes
+                self.save_timesheet()
+                
+                embed = discord.Embed(
+                    title="✅ Entry Removed",
+                    description=f"Entry #{entry_number} has been removed",
+                    color=discord.Color.green(),
+                    timestamp=datetime.now()
+                )
+                embed.add_field(
+                    name="Removed Entry",
+                    value=f"""```
+        Date: {entry['date']}
+        Time: {entry['time_in']} - {entry['time_out']}
+        Duration: {entry['duration']}h```""",
+                    inline=False
+                )
+                
+                await interaction.response.send_message(embed=embed)
+                
+            except Exception as e:
+                await interaction.response.send_message(f"Error removing entry: {str(e)}", ephemeral=True)
+
+        @self.tree.command(name="edit_entry", description="Edit a timesheet entry")
+        async def edit_entry(
+            interaction: discord.Interaction, 
+            entry_number: int,
+            date: str = None,
+            time_in: str = None,
+            time_out: str = None
+        ):
+            """Edit an existing timesheet entry"""
+            if interaction.user.id != self.owner_id:
+                await interaction.response.send_message("Only the owner can use this command.", ephemeral=True)
+                return
+
+            try:
+                if entry_number < 1 or entry_number > len(self.timesheet_data["entries"]):
+                    await interaction.response.send_message("Invalid entry number.", ephemeral=True)
+                    return
+
+                # Get the entry to edit
+                entry = self.timesheet_data["entries"][entry_number - 1]
+                old_entry = entry.copy()
+                
+                # Update fields if provided
+                if date:
+                    try:
+                        datetime.strptime(date, "%Y-%m-%d")
+                        entry["date"] = date
+                    except ValueError:
+                        await interaction.response.send_message("Invalid date format. Use YYYY-MM-DD", ephemeral=True)
+                        return
+                        
+                if time_in:
+                    try:
+                        datetime.strptime(time_in, "%H:%M")
+                        entry["time_in"] = time_in
+                    except ValueError:
+                        await interaction.response.send_message("Invalid time_in format. Use HH:MM", ephemeral=True)
+                        return
+                        
+                if time_out:
+                    try:
+                        datetime.strptime(time_out, "%H:%M")
+                        entry["time_out"] = time_out
+                    except ValueError:
+                        await interaction.response.send_message("Invalid time_out format. Use HH:MM", ephemeral=True)
+                        return
+
+                # Recalculate duration
+                if time_in or time_out:
+                    time_in_dt = datetime.strptime(entry["time_in"], "%H:%M")
+                    time_out_dt = datetime.strptime(entry["time_out"], "%H:%M")
+                    if time_out_dt < time_in_dt:  # Handle overnight shifts
+                        time_out_dt += timedelta(days=1)
+                    duration = (time_out_dt - time_in_dt).total_seconds() / 3600
+                    entry["duration"] = round(duration, 2)
+
+                # Recalculate total hours
+                self.timesheet_data["total_hours"] = round(
+                    sum(entry["duration"] for entry in self.timesheet_data["entries"]), 2
+                )
+                
+                # Save changes
+                self.save_timesheet()
+                
+                embed = discord.Embed(
+                    title="✅ Entry Updated",
+                    description=f"Entry #{entry_number} has been updated",
+                    color=discord.Color.green(),
+                    timestamp=datetime.now()
+                )
+                embed.add_field(
+                    name="Old Entry",
+                    value=f"""```
+        Date: {old_entry['date']}
+        Time: {old_entry['time_in']} - {old_entry['time_out']}
+        Duration: {old_entry['duration']}h```""",
+                    inline=True
+                )
+                embed.add_field(
+                    name="New Entry",
+                    value=f"""```
+        Date: {entry['date']}
+        Time: {entry['time_in']} - {entry['time_out']}
+        Duration: {entry['duration']}h```""",
+                    inline=True
+                )
+                
+                await interaction.response.send_message(embed=embed)
+                
+            except Exception as e:
+                await interaction.response.send_message(f"Error editing entry: {str(e)}", ephemeral=True)
 
     def format_uptime(self):
         """Format the system uptime"""
@@ -2138,43 +2303,55 @@ class TimelapseCamera:
     async def auto_checkout(self, user):
         """Handle automatic checkout after specified duration"""
         if self.active_clock:
-            duration = (datetime.now() - self.active_clock["start_time"]).total_seconds() / 3600
-            
-            # Add entry to timesheet
-            entry = {
-                "date": datetime.now().strftime("%Y-%m-%d"),
-                "time_in": self.active_clock["start_time"].strftime("%H:%M"),
-                "time_out": datetime.now().strftime("%H:%M"),
-                "duration": round(duration, 2),
-                "auto_checkout": True
-            }
-            
-            self.timesheet_data["entries"].append(entry)
-            self.timesheet_data["total_hours"] = round(
-                sum(entry["duration"] for entry in self.timesheet_data["entries"]), 2
-            )
-            
-            self.save_timesheet()
-            self.active_clock = None
-
-            # Send DM to owner
             try:
-                owner = await self.discord_client.fetch_user(self.owner_id)
-                if owner:
-                    embed = discord.Embed(
-                        title="⚠️ Auto Clock-Out",
-                        description="You have been automatically clocked out",
-                        color=discord.Color.yellow(),
-                        timestamp=datetime.now()
-                    )
-                    embed.add_field(
-                        name="Duration",
-                        value=f"{round(duration, 2)} hours",
-                        inline=True
-                    )
-                    await owner.send(embed=embed)
+                duration = (datetime.now() - self.active_clock["start_time"]).total_seconds() / 3600
+                
+                # Add entry to timesheet
+                entry = {
+                    "date": datetime.now().strftime("%Y-%m-%d"),
+                    "time_in": self.active_clock["start_time"].strftime("%H:%M"),
+                    "time_out": datetime.now().strftime("%H:%M"),
+                    "duration": round(duration, 2),
+                    "auto_checkout": True
+                }
+                
+                self.timesheet_data["entries"].append(entry)
+                self.timesheet_data["total_hours"] = round(
+                    sum(entry["duration"] for entry in self.timesheet_data["entries"]), 2
+                )
+                
+                # Clear active session data
+                self.active_clock = None
+                self.timesheet_data["active_session"] = None
+                
+                # Save changes
+                self.save_timesheet()
+
+                # Send DM to owner
+                try:
+                    owner = await self.discord_client.fetch_user(self.owner_id)
+                    if owner:
+                        embed = discord.Embed(
+                            title="⚠️ Auto Clock-Out",
+                            description="You have been automatically clocked out",
+                            color=discord.Color.yellow(),
+                            timestamp=datetime.now()
+                        )
+                        embed.add_field(
+                            name="Duration",
+                            value=f"{round(duration, 2)} hours",
+                            inline=True
+                        )
+                        await owner.send(embed=embed)
+                except Exception as e:
+                    logger.error(f"Failed to send auto-checkout notification: {str(e)}")
+                    
             except Exception as e:
-                logger.error(f"Failed to send auto-checkout notification: {str(e)}")
+                logger.error(f"Error during auto-checkout: {str(e)}")
+                # Force clear session data even if error occurs
+                self.active_clock = None
+                self.timesheet_data["active_session"] = None
+                self.save_timesheet()
 
     async def play_motion_alert(self):
         """Play Imperial March with 10-minute cooldown"""
